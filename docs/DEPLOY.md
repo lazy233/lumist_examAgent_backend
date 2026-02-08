@@ -84,15 +84,21 @@ docker compose logs -f backend
 
 ---
 
-## 五、初始化数据库（首次部署必做）
+## 五、数据库说明（无需额外操作）
 
-PostgreSQL 启动时会自动执行 `sql/schema.sql` 建表。**用户画像等字段**需要再执行一次迁移：
+首次执行 `docker compose up -d` 且 Postgres 数据卷为空时，会自动：
+
+1. 创建数据库（`.env` 里配置的 `POSTGRES_DB`，如 `lumist_exam_agent`）
+2. 执行 `sql/schema.sql`，创建所有基础表（users、docs、exercises、questions、answers、exercise_results）
+3. 执行 `sql/migrations/001_add_user_profile_columns.sql`，为 users 表补齐个人中心相关字段
+
+因此**新部署只需执行「四、构建并启动」**，无需再单独跑迁移脚本。
+
+若数据库是**之前用旧版 schema 建好的**，可手动执行一次迁移：
 
 ```bash
 docker compose exec backend python scripts/run_migration_001_user_profile.py
 ```
-
-看到成功提示即可。
 
 ---
 

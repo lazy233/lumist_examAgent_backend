@@ -1,0 +1,53 @@
+# Lumist ExamAgent Backend - 一键部署（仅需服务器安装 Docker）
+# 使用前：复制 .env.example 为 .env 并按需修改
+
+services:
+  backend:
+    build: .
+    image: lumist-examagent-backend:latest
+    container_name: lumist-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://postgres:${POSTGRES_PASSWORD:-lumist_pg_pass}@postgres:5432/${POSTGRES_DB:-lumist_exam_agent}
+      QDRANT_URL: http://qdrant:6333
+    volumes:
+      - backend_data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: lumist-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lumist_pg_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-lumist_exam_agent}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  qdrant:
+    image: qdrant/qdrant:v1.7.4
+    container_name: lumist-qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+volumes:
+  backend_data:
+  postgres_data:
+  qdrant_data:

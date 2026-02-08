@@ -1,0 +1,26 @@
+# Git 与版本控制
+.git
+.gitignore
+
+# 虚拟环境与本地环境
+.venv
+venv
+.env
+.env.*
+!.env.example
+
+# 本地数据与模型（不打包进镜像）
+data/
+models/
+
+# IDE 与缓存
+.idea
+.vscode
+__pycache__
+*.py[cod]
+.pytest_cache
+*.log
+
+# 文档与杂项（不影响运行）
+*.md
+!README.md

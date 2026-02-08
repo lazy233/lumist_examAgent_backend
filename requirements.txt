@@ -6,10 +6,7 @@ sqlalchemy
 psycopg2-binary
 redis
 python-multipart
-qdrant-client
 langchain-community
-modelscope
-sentence-transformers
 pypdf
 docx2txt
 python-pptx

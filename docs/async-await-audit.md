@@ -93,19 +93,6 @@
 
 - 未使用 `aiofiles` 或 `run_in_executor` 包装文件操作，所有文件 I/O 均在主线程/事件循环中同步执行。
 
-### 4.3 向量库 / Embedding
-
-| 文件 | 调用方式 | 说明 |
-|------|----------|------|
-| `app/services/qdrant_service.py` | `QdrantClient(...)`、`client.upsert(...)`、`client.delete(...)` | 同步 Qdrant 客户端 |
-| `app/services/embedding_service.py` | `SentenceTransformer(...)`、`model.encode(texts)` | CPU/GPU 同步计算，耗时长 |
-
-**问题小结：**
-
-- Qdrant 与 embedding 均为同步调用，`parse_doc` 等链路会长时间占用工作线程/进程。
-
----
-
 ## 五、流式响应
 
 | 文件 | 实现 | 说明 |
@@ -134,8 +121,7 @@
 2. **路由**：所有涉及 I/O 的路由改为 `async def`，并在其中使用 `await` 调用异步 DB/HTTP/文件。
 3. **LLM / 百炼**：使用 `openai.AsyncOpenAI` 或 `httpx.AsyncClient` 封装异步请求；流式使用异步迭代器。
 4. **文件 I/O**：使用 `aiofiles` 或 `asyncio.to_thread`（`run_in_executor`）包装同步文件操作。
-5. **Embedding / Qdrant**：使用 `asyncio.to_thread` 包装 CPU 密集的 `embed_texts`；Qdrant 若提供异步客户端可替换为异步调用。
-6. **流式生成**：`stream_raw_and_collect` 改为 `async def` 生成器，内部 `async for chunk in completion`，`StreamingResponse` 使用异步生成器。
+5. **流式生成**：`stream_raw_and_collect` 改为 `async def` 生成器，内部 `async for chunk in completion`，`StreamingResponse` 使用异步生成器。
 
 ---
 
@@ -151,9 +137,7 @@
 - `app/services/exercise_service.py` — 分析材料、流式生成题目、解析落库
 - `app/services/file_analyze_service.py` — 文件上传与 qwen-long 分析
 - `app/services/bailian_retrieve_service.py` — 百炼检索
-- `app/services/doc_parse_service.py` — 文档解析与向量化
-- `app/services/embedding_service.py` — 向量化
-- `app/services/qdrant_service.py` — Qdrant 写入/删除
+- `app/services/doc_parse_service.py` — 文档解析
 - `app/services/storage_service.py` — 文件存储
 - `app/repositories/user_repository.py` — 用户查询/创建
 

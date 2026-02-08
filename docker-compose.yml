@@ -12,14 +12,11 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql+psycopg2://postgres:${POSTGRES_PASSWORD:-lumist_pg_pass}@postgres:5432/${POSTGRES_DB:-lumist_exam_agent}
-      QDRANT_URL: http://qdrant:6333
     volumes:
       - backend_data:/app/data
     depends_on:
       postgres:
         condition: service_healthy
-      qdrant:
-        condition: service_started
 
   postgres:
     image: postgres:15-alpine
@@ -38,16 +35,6 @@ services:
       timeout: 5s
       retries: 5
 
-  qdrant:
-    image: qdrant/qdrant:v1.7.4
-    container_name: lumist-qdrant
-    restart: unless-stopped
-    ports:
-      - "6333:6333"
-    volumes:
-      - qdrant_data:/qdrant/storage
-
 volumes:
   backend_data:
   postgres_data:
-  qdrant_data:

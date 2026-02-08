@@ -60,7 +60,7 @@ POSTGRES_PASSWORD=你的强密码
 POSTGRES_DB=lumist_exam_agent
 ```
 
-其余项可按需修改（如百炼 RAG、嵌入模型等），不修改则使用默认值。
+其余项可按需修改（如百炼 RAG 等），不修改则使用默认值。
 
 ---
 
@@ -73,8 +73,7 @@ docker compose build
 docker compose up -d
 ```
 
-- 首次构建可能较久（安装 Python 依赖、sentence-transformers 等）。
-- 首次运行后端时，嵌入模型会从网络下载（约 80MB），国内建议在 `.env` 中设置 `HF_ENDPOINT=https://hf-mirror.com`。
+- 首次构建可能较久（安装 Python 依赖等）。
 
 查看服务状态与日志：
 
@@ -102,7 +101,7 @@ docker compose exec backend python scripts/run_migration_001_user_profile.py
 - **健康检查**：`http://服务器IP:8000/api/health`（或你配置的 `API_PREFIX` + `/health`）
 - **API 文档**：`http://服务器IP:8000/docs`
 
-若 8000 端口被防火墙拦截，需在安全组/防火墙中放行 TCP 8000（以及可选 6333 若需从外网访问 Qdrant）。
+若 8000 端口被防火墙拦截，需在安全组/防火墙中放行 TCP 8000。
 
 ---
 
@@ -123,7 +122,6 @@ docker compose exec backend python scripts/run_migration_001_user_profile.py
 以下数据通过 Docker Volume 持久化，`docker compose down` 不会删除：
 
 - `postgres_data`：PostgreSQL 数据
-- `qdrant_data`：Qdrant 向量数据
 - `backend_data`：后端上传/文库等文件（`/app/data`）
 
 若需完全清空重来（**会删掉所有数据**）：
@@ -134,10 +132,9 @@ docker compose down -v
 
 ---
 
-## 九、使用外部数据库或 Qdrant
+## 九、使用外部数据库
 
 - **使用外部 PostgreSQL**：在 `.env` 中设置 `DATABASE_URL`，并修改 `docker-compose.yml` 中 `backend` 的 `environment`，去掉或改写 `DATABASE_URL`，且可去掉 `postgres` 服务及 `depends_on` 中的 postgres。
-- **使用外部 Qdrant**：在 `.env` 中设置 `QDRANT_URL` 为外部地址，并修改 `docker-compose.yml` 中 `backend` 的 `environment` 中 `QDRANT_URL`，且可去掉 `qdrant` 服务及 `depends_on` 中的 qdrant。
 
 ---
 
@@ -146,13 +143,10 @@ docker compose down -v
 1. **后端启动报错找不到数据库**  
    等待 PostgreSQL 健康后再启动后端；`depends_on` 已配置 `condition: service_healthy`，若仍失败可多等几秒后 `docker compose restart backend`。
 
-2. **嵌入模型下载很慢或失败**  
-   在 `.env` 中设置 `HF_ENDPOINT=https://hf-mirror.com`，并保证容器能访问外网。
-
-3. **端口被占用**  
+2. **端口被占用**  
    修改 `docker-compose.yml` 中 `backend` 的 `ports`，例如改为 `"8080:8000"`，则访问时用 8080。
 
-4. **需要查看/调试**  
+3. **需要查看/调试**  
    `docker compose exec backend bash` 进入容器，或 `docker compose logs -f backend` 查看日志。
 
 完成以上步骤后，服务即可在服务器上仅依赖 Docker 运行。

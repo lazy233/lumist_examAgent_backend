@@ -9,7 +9,6 @@ from sqlalchemy.orm import Session
 from app.core.db import get_db
 from app.models.doc import Doc
 from app.repositories.user_repository import DEV_USER_ID, get_or_create_dev_user
-from app.services.qdrant_service import delete_chunks_by_doc_id, get_client
 from app.services.storage_service import delete_doc_files, save_to_library, save_upload
 
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".pptx", ".txt"}
@@ -198,11 +197,6 @@ def delete_doc(doc_id: str, db: Session = Depends(get_db)):
     doc = db.query(Doc).filter(Doc.id == doc_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail="doc not found")
-    try:
-        qdrant = get_client()
-        delete_chunks_by_doc_id(qdrant, doc_id)
-    except Exception:
-        pass
     delete_doc_files(doc)
     db.delete(doc)
     db.commit()

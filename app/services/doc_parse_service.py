@@ -1,17 +1,11 @@
-import json
 import re
-import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pptx import Presentation
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader, TextLoader
 
-from app.core.config import settings
-from app.services.embedding_service import embed_texts
 from app.services.llm_service import summarize_document
-from app.services.qdrant_service import get_client, ensure_collection, upsert_chunks
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -51,36 +45,6 @@ def _load_text(file_path: str) -> str:
         return _load_pptx_text(file_path)
     raise ValueError("Unsupported file type")
 
-def _save_debug_files(doc_id: str, owner_id: str, cleaned_text: str, chunks: list[str], vectors: list[list[float]]) -> None:
-    """保存解析内容和向量库写入指令到本地，方便调试"""
-    debug_path = Path(settings.debug_dir)
-    debug_path.mkdir(parents=True, exist_ok=True)
-
-    # 1. 解析出的全文
-    parsed_file = debug_path / f"{doc_id}_parsed.txt"
-    parsed_file.write_text(cleaned_text, encoding="utf-8")
-
-    # 2. 发到 Qdrant 的 upsert 指令（不含完整向量，仅保留维度示例）
-    upsert_data = {
-        "collection": settings.qdrant_collection,
-        "points": [
-            {
-                "id": str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{doc_id}_{idx}")),
-                "payload": {
-                    "docId": doc_id,
-                    "ownerId": owner_id,
-                    "chunkIndex": idx,
-                    "content": text,
-                },
-                "vector": vec,
-            }
-            for idx, (text, vec) in enumerate(zip(chunks, vectors))
-        ],
-    }
-    qdrant_file = debug_path / f"{doc_id}_qdrant_upsert.json"
-    qdrant_file.write_text(json.dumps(upsert_data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
 def parse_and_index(
     file_path: str,
     doc_id: str,
@@ -101,20 +65,3 @@ def parse_and_index(
         kps = parsed.get("knowledgePoints")
         doc.parsed_knowledge_points = kps if isinstance(kps, list) else []
         db.commit()
-
-    # 2. 分块、向量化、写入 Qdrant
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=settings.chunk_size,
-        chunk_overlap=settings.chunk_overlap,
-    )
-    chunks = splitter.split_text(cleaned)
-    chunks = [c.strip() for c in chunks if c.strip()]
-
-    vectors = embed_texts(chunks)
-
-    # 调试：保存解析内容和 Qdrant 写入指令到本地
-    _save_debug_files(doc_id, owner_id, cleaned, chunks, vectors)
-
-    client = get_client()
-    ensure_collection(client)
-    upsert_chunks(client, doc_id=doc_id, owner_id=owner_id, chunks=chunks, vectors=vectors)

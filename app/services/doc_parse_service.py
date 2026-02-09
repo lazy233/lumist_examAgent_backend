@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 from pptx import Presentation
 from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader, TextLoader
 
-from app.services.llm_service import summarize_document
+from app.services.llm_service import parse_summary_content, stream_summarize_document, summarize_document
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -57,6 +57,37 @@ def parse_and_index(
 
     # 1. 大模型总结，返回结构化数据
     parsed = summarize_document(cleaned)
+    if db is not None and doc is not None:
+        doc.parsed_school = parsed.get("school") or ""
+        doc.parsed_major = parsed.get("major") or ""
+        doc.parsed_course = parsed.get("course") or ""
+        doc.parsed_summary = parsed.get("summary") or ""
+        kps = parsed.get("knowledgePoints")
+        doc.parsed_knowledge_points = kps if isinstance(kps, list) else []
+        db.commit()
+
+
+def parse_and_index_stream(
+    file_path: str,
+    doc_id: str,
+    owner_id: str,
+    db: "Session | None" = None,
+    doc: "Doc | None" = None,
+):
+    """
+    流式解析文档，yield 内容片段（可用于 SSE 打字机效果）。
+    结束后会将解析结果写入 doc。
+    """
+    raw_text = _load_text(file_path)
+    cleaned = _clean_text(raw_text)
+
+    buffer: list[str] = []
+    for chunk in stream_summarize_document(cleaned):
+        buffer.append(chunk)
+        yield chunk
+
+    full = "".join(buffer)
+    parsed = parse_summary_content(full)
     if db is not None and doc is not None:
         doc.parsed_school = parsed.get("school") or ""
         doc.parsed_major = parsed.get("major") or ""

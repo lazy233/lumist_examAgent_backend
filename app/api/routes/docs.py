@@ -1,9 +1,12 @@
+import json
 import mimetypes
 import uuid
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.core.db import get_db
@@ -120,6 +123,13 @@ def _doc_to_item(doc: Doc) -> dict:
     return item
 
 
+def _sse_event(data: dict, event: str | None = None) -> str:
+    payload = json.dumps(data, ensure_ascii=False)
+    if event:
+        return f"event: {event}\ndata: {payload}\n\n"
+    return f"data: {payload}\n\n"
+
+
 @router.get("/docs/{doc_id}/file")
 def get_doc_file(doc_id: str, db: Session = Depends(get_db)):
     """获取文件内容以便前端预览。返回文件流，带正确的 Content-Type。"""
@@ -130,11 +140,17 @@ def get_doc_file(doc_id: str, db: Session = Depends(get_db)):
     if not path.exists():
         raise HTTPException(status_code=404, detail="file not found")
     media_type, _ = mimetypes.guess_type(doc.file_name) or ("application/octet-stream", None)
+    filename = doc.file_name or "file"
+    # RFC 5987: 允许非 ASCII 文件名，避免 latin-1 编码错误
+    filename_star = quote(filename)
+    headers = {
+        "Content-Disposition": f"inline; filename*=UTF-8''{filename_star}"
+    }
     return FileResponse(
         path,
         media_type=media_type,
-        filename=doc.file_name,
-        headers={"Content-Disposition": f'inline; filename="{doc.file_name}"'},
+        filename=filename,
+        headers=headers,
     )
 
 
@@ -164,32 +180,59 @@ def list_docs(
 
 @router.post("/docs/{doc_id}/parse")
 def parse_doc(doc_id: str, db: Session = Depends(get_db)):
-    from app.services.doc_parse_service import parse_and_index
+    from app.services.doc_parse_service import parse_and_index_stream
 
     doc = db.query(Doc).filter(Doc.id == doc_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail="doc not found")
 
-    # 标记解析中
-    doc.status = "parsing"
-    db.commit()
-
-    try:
-        parse_and_index(
-            file_path=doc.file_path,
-            doc_id=doc.id,
-            owner_id=doc.owner_id,
-            db=db,
-            doc=doc,
-        )
-        doc.status = "done"
-    except Exception:
-        doc.status = "failed"
-        raise
-    finally:
+    def gen():
+        # 1) 标记解析中
+        doc.status = "parsing"
         db.commit()
+        yield _sse_event({"docId": doc.id, "status": "parsing"}, event="status")
 
-    return {"docId": doc.id, "status": doc.status}
+        try:
+            # 2) 调用大模型解析（流式）
+            yield _sse_event({"stage": "summarize"}, event="progress")
+            for chunk in parse_and_index_stream(
+                file_path=doc.file_path,
+                doc_id=doc.id,
+                owner_id=doc.owner_id,
+                db=db,
+                doc=doc,
+            ):
+                if chunk:
+                    yield _sse_event({"content": chunk}, event="chunk")
+            doc.status = "done"
+            db.commit()
+            db.refresh(doc)
+
+            # 3) 返回解析结果
+            parsed = {
+                "school": doc.parsed_school or "",
+                "major": doc.parsed_major or "",
+                "course": doc.parsed_course or "",
+                "knowledgePoints": doc.parsed_knowledge_points or [],
+                "summary": doc.parsed_summary or "",
+            }
+            yield _sse_event(
+                {"docId": doc.id, "status": "done", "parsed": parsed},
+                event="result",
+            )
+        except Exception as e:
+            doc.status = "failed"
+            db.commit()
+            yield _sse_event(
+                {"docId": doc.id, "status": "failed", "detail": str(e)},
+                event="error",
+            )
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.delete("/docs/{doc_id}", status_code=204)

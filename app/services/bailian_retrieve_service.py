@@ -1,4 +1,5 @@
 """百炼知识库检索服务：RAG 召回，供出题生成时增强上下文。"""
+import asyncio
 import logging
 import os
 from typing import Any
@@ -126,7 +127,18 @@ def retrieve(
     return nodes_for_logging, concatenated_text
 
 
-def retrieve_for_question_generation(
+async def retrieve_async(
+    workspace_id: str,
+    index_id: str,
+    query: str,
+    client: Any = None,
+) -> tuple[list[dict[str, Any]], str]:
+    return await asyncio.to_thread(
+        retrieve, workspace_id=workspace_id, index_id=index_id, query=query, client=client
+    )
+
+
+async def retrieve_for_question_generation(
     user_content: str,
     workspace_id: str | None = None,
     index_id: str | None = None,
@@ -139,4 +151,4 @@ def retrieve_for_question_generation(
     ws = (workspace_id or "").strip() or getattr(settings, "bailian_workspace_id", "") or ""
     idx = (index_id or "").strip() or getattr(settings, "bailian_index_id", "") or ""
     query = (user_content or "").strip()[:2000]  # 避免 query 过长
-    return retrieve(workspace_id=ws, index_id=idx, query=query or "出题")
+    return await retrieve_async(workspace_id=ws, index_id=idx, query=query or "出题")

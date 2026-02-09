@@ -3,9 +3,10 @@ import json
 import logging
 import re
 import uuid
-from typing import Any, Iterator
+from typing import Any, AsyncIterator
 
 from app.services.llm_service import get_openai_client
+from sqlalchemy import select
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ QUESTION_TYPE_LABELS = {
 DIFFICULTY_LABELS = {"easy": "简单", "medium": "中等", "hard": "困难"}
 
 
-def analyze_material(
+async def analyze_material(
     content: str,
     question_type: str,
     difficulty: str,
@@ -64,7 +65,7 @@ def analyze_material(
     prompt += (content.strip() or "")[:6000]
 
     client = get_openai_client()
-    completion = client.chat.completions.create(
+    completion = await client.chat.completions.create(
         model="MiniMax-M2.1",
         messages=[{"role": "user", "content": prompt}],
         extra_body={"enable_thinking": True},
@@ -139,14 +140,14 @@ def _parse_questions_text(full_content: str) -> list[dict[str, Any]]:
     return items
 
 
-def stream_raw_and_collect(
+async def stream_raw_and_collect(
     content: str,
     question_type: str,
     difficulty: str,
     count: int,
     rag_context: str | None = None,
     intent_context: str | None = None,
-) -> Iterator[str | dict[str, Any]]:
+) -> AsyncIterator[str | dict[str, Any]]:
     """
     流式调用模型生成题目内容，逐个 yield 文本片段（仅 content，不含 reasoning）；
     结束时若拿到 usage 会 yield 一个 {"_usage": { inputTokens, outputTokens, totalTokens }}，调用方勿当正文下发。
@@ -168,7 +169,7 @@ def stream_raw_and_collect(
         "=" * 60,
     )
     client = get_openai_client()
-    completion = client.chat.completions.create(
+    completion = await client.chat.completions.create(
         model="MiniMax-M2.1",
         messages=[{"role": "user", "content": prompt}],
         extra_body={"enable_thinking": True},
@@ -177,7 +178,7 @@ def stream_raw_and_collect(
     )
     is_answering = False
     last_usage = None
-    for chunk in completion:
+    async for chunk in completion:
         if getattr(chunk, "usage", None) is not None:
             last_usage = _normalize_usage(chunk.usage)
         if not chunk.choices:
@@ -240,7 +241,7 @@ D. 机器语言
     return prompt
 
 
-def parse_and_save_questions(
+async def parse_and_save_questions(
     full_content: str,
     exercise_id: str,
     question_type: str,
@@ -277,7 +278,7 @@ def parse_and_save_questions(
             options=options,
         )
         db_session.add(question)
-        db_session.flush()  # 先写入 questions，再插 answers，避免外键约束报错
+        await db_session.flush()  # 先写入 questions，再插 answers，避免外键约束报错
 
         aid = str(uuid.uuid4())
         answer = Answer(
@@ -288,8 +289,9 @@ def parse_and_save_questions(
         )
         db_session.add(answer)
 
-    exercise = db_session.query(Exercise).filter(Exercise.id == exercise_id).first()
+    result = await db_session.execute(select(Exercise).where(Exercise.id == exercise_id))
+    exercise = result.scalars().first()
     if exercise:
         exercise.status = "done"
         logger.info("[parse_and_save_questions] exercise_id=%s 状态已设为 done", exercise_id)
-    db_session.commit()
+    await db_session.commit()

@@ -1,11 +1,13 @@
 """文件分析服务：上传文件到百炼，用 qwen-long 分析文档内容，供后续出题使用。"""
+import asyncio
+import io
 import logging
 import os
 import re
 from pathlib import Path
 from typing import Any
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
 
@@ -15,12 +17,12 @@ os.environ.setdefault("HTTPS_PROXY", "")
 os.environ.setdefault("NO_PROXY", "*")
 
 
-def _get_file_client() -> OpenAI:
+def _get_file_client() -> AsyncOpenAI:
     """文件上传与 qwen-long 使用同一 Dashscope 兼容端点，可用 DASHSCOPE_API_KEY 或 OPENAI_API_KEY。"""
     api_key = os.getenv("DASHSCOPE_API_KEY") or os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise ValueError("请设置环境变量 DASHSCOPE_API_KEY 或 OPENAI_API_KEY")
-    return OpenAI(
+    return AsyncOpenAI(
         api_key=api_key,
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
     )
@@ -51,7 +53,7 @@ def _normalize_usage(raw: Any) -> dict[str, int] | None:
 _TITLE_LINE_RE = re.compile(r"^\s*标题[：:]\s*(.+)$")
 
 
-def analyze_file_for_questions(file_path: str | Path) -> tuple[str, str, dict[str, int] | None]:
+async def analyze_file_for_questions(file_path: str | Path) -> tuple[str, str, dict[str, int] | None]:
     """
     上传文件到百炼并调用 qwen-long 分析文档，得到适合作为出题材料的文本。
 
@@ -65,12 +67,12 @@ def analyze_file_for_questions(file_path: str | Path) -> tuple[str, str, dict[st
         - usage: { inputTokens, outputTokens, totalTokens } 或 None。
     """
     path = Path(file_path)
-    if not path.is_file():
+    if not await asyncio.to_thread(path.is_file):
         raise FileNotFoundError(f"文件不存在: {path}")
 
     client = _get_file_client()
-    with open(path, "rb") as f:
-        file_object = client.files.create(file=f, purpose="file-extract")
+    data = await asyncio.to_thread(path.read_bytes)
+    file_object = await client.files.create(file=io.BytesIO(data), purpose="file-extract")
     file_id = getattr(file_object, "id", None)
     if not file_id:
         raise RuntimeError("文件上传后未返回 id")
@@ -78,7 +80,7 @@ def analyze_file_for_questions(file_path: str | Path) -> tuple[str, str, dict[st
     user_prompt = """请分析这篇文档的内容，提炼出主要内容和适合出题的知识要点，用连贯的文本概括（将作为后续出题的材料）。
 若需要建议标题，请在第一行写：标题：xxx ，换行后再写正文；否则直接写正文。"""
 
-    completion = client.chat.completions.create(
+    completion = await client.chat.completions.create(
         model="qwen-long",
         messages=[
             {"role": "system", "content": f"fileid://{file_id}"},

@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends
 
 from pydantic import BaseModel, Field
 
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.core.db import get_db
@@ -59,15 +59,15 @@ def _user_to_profile_response(user: User) -> UserProfileResponse:
 
 
 @router.get("/profile", response_model=UserProfileResponse)
-def get_profile(user: User = Depends(get_current_user)):
+async def get_profile(user: User = Depends(get_current_user)):
     """获取当前用户个人资料（个人中心展示）。"""
     return _user_to_profile_response(user)
 
 
 @router.put("/profile", response_model=UserProfileResponse)
-def update_profile(
+async def update_profile(
     body: UserProfileUpdate,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     """更新当前用户个人资料（个人中心保存）。"""
@@ -89,6 +89,6 @@ def update_profile(
         user.difficulty_preference = body.difficultyPreference
     if body.questionCount is not None:
         user.question_count = body.questionCount
-    db.commit()
-    db.refresh(user)
+    await db.commit()
+    await db.refresh(user)
     return _user_to_profile_response(user)

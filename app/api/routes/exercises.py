@@ -1,4 +1,5 @@
 """AI 出题：分析材料、流式生成题目；练习详情、提交答案、练习列表。"""
+import asyncio
 import json
 import logging
 import re
@@ -12,7 +13,8 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 logger = logging.getLogger(__name__)
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import SessionLocal, get_db
 from app.models.answer import Answer
@@ -122,15 +124,15 @@ class AnalyzeFileResponse(BaseModel):
 
 
 @router.post("/exercises/analyze", response_model=AnalyzeResponse)
-def analyze(
+async def analyze(
     body: AnalyzeRequest,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     分析材料，返回出题要点。用户确认后再调用 /exercises/generate-from-text。
     """
-    user = get_or_create_dev_user(db)
-    key_points, usage = analyze_material(
+    user = await get_or_create_dev_user(db)
+    key_points, usage = await analyze_material(
         content=body.content,
         question_type=body.question_type,
         difficulty=body.difficulty,
@@ -162,29 +164,32 @@ def analyze(
 @router.post("/exercises/analyze-file", response_model=AnalyzeFileResponse)
 async def analyze_file(
     file: UploadFile = File(..., description="待分析的文档（如 .txt / .pdf 等）"),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     上传文件，调用大模型（qwen-long）分析文档内容，得到出题材料。
     用户确认后，将返回的 content、title 作为请求体调用 POST /exercises/generate-from-text 生成题目。
     """
-    get_or_create_dev_user(db)
+    await get_or_create_dev_user(db)
     if not file.filename or not file.filename.strip():
         raise HTTPException(status_code=400, detail="请上传文件")
     suffix = Path(file.filename).suffix or ".txt"
     try:
         content_bytes = await file.read()
         normalized_bytes = _normalize_upload_to_utf8(content_bytes, suffix)
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            tmp.write(normalized_bytes)
-            tmp_path = tmp.name
+        def _write_tmp_file(data: bytes, suffix_name: str) -> str:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix_name) as tmp:
+                tmp.write(data)
+                return tmp.name
+
+        tmp_path = await asyncio.to_thread(_write_tmp_file, normalized_bytes, suffix)
         try:
-            content, title, usage = analyze_file_for_questions(tmp_path)
+            content, title, usage = await analyze_file_for_questions(tmp_path)
             usage_info = UsageInfo(**usage) if usage else None
             return AnalyzeFileResponse(content=content, title=title or "", usage=usage_info)
         finally:
             try:
-                Path(tmp_path).unlink(missing_ok=True)
+                await asyncio.to_thread(Path(tmp_path).unlink, missing_ok=True)
             except Exception as e:
                 logger.warning("删除临时文件失败 %s: %s", tmp_path, e)
     except ValueError as e:
@@ -196,7 +201,7 @@ async def analyze_file(
         raise HTTPException(status_code=500, detail="文件分析失败，请稍后重试")
 
 
-def _log_rag_recall(exercise_id: str, nodes: list) -> None:
+async def _log_rag_recall(exercise_id: str, nodes: list) -> None:
     """输出 RAG 召回结果，便于调试。"""
     if not nodes:
         logger.info("[RAG 召回] exercise_id=%s 无召回片段", exercise_id)
@@ -210,19 +215,19 @@ def _log_rag_recall(exercise_id: str, nodes: list) -> None:
         logger.info("  [%d] score=%s | %s", i, score, text)
     debug_dir = getattr(settings, "debug_dir", None)
     if debug_dir:
-        import json
+        import aiofiles
         import os
-        os.makedirs(debug_dir, exist_ok=True)
+        await asyncio.to_thread(os.makedirs, debug_dir, exist_ok=True)
         path = os.path.join(debug_dir, f"rag_recall_{exercise_id}.json")
         try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(nodes, f, ensure_ascii=False, indent=2)
+            async with aiofiles.open(path, "w", encoding="utf-8") as f:
+                await f.write(json.dumps(nodes, ensure_ascii=False, indent=2))
             logger.info("[RAG 召回] 已写入 %s", path)
         except Exception as e:
             logger.warning("[RAG 召回] 写入调试文件失败: %s", e)
 
 
-def _stream_generate(
+async def _stream_generate(
     content: str,
     question_type: str,
     difficulty: str,
@@ -239,7 +244,7 @@ def _stream_generate(
     buffer: list[str] = []
     final_usage: dict | None = None
     try:
-        for chunk in stream_raw_and_collect(
+        async for chunk in stream_raw_and_collect(
             content=content,
             question_type=question_type,
             difficulty=difficulty,
@@ -259,34 +264,33 @@ def _stream_generate(
         return
     full = "".join(buffer)
     logger.info("[generate-from-text] 流式结束 exercise_id=%s 收集长度=%d", exercise_id, len(full))
-    db = SessionLocal()
-    parse_ok = False
-    try:
-        logger.info("[generate-from-text] 开始解析并落库 exercise_id=%s", exercise_id)
-        parse_and_save_questions(
-            full_content=full,
-            exercise_id=exercise_id,
-            question_type=question_type,
-            db_session=db,
-        )
-        parse_ok = True
-        logger.info("[generate-from-text] 解析落库成功 exercise_id=%s 状态已设为 done", exercise_id)
-    except Exception as e:
-        logger.exception("[generate-from-text] 解析或落库失败 exercise_id=%s: %s", exercise_id, e)
+    async with SessionLocal() as db:
+        parse_ok = False
         try:
-            db.rollback()  # 先回滚，否则 session 处于 PendingRollback 无法再查询
-            ex = db.query(Exercise).filter(Exercise.id == exercise_id).first()
-            if ex:
-                ex.status = "failed"
-                db.commit()
-                logger.info("[generate-from-text] 已将练习状态设为 failed exercise_id=%s", exercise_id)
-            else:
-                logger.warning("[generate-from-text] 未找到练习无法设为 failed exercise_id=%s", exercise_id)
-        except Exception as e2:
-            logger.exception("[generate-from-text] 更新状态为 failed 时出错: %s", e2)
-            db.rollback()
-    finally:
-        db.close()
+            logger.info("[generate-from-text] 开始解析并落库 exercise_id=%s", exercise_id)
+            await parse_and_save_questions(
+                full_content=full,
+                exercise_id=exercise_id,
+                question_type=question_type,
+                db_session=db,
+            )
+            parse_ok = True
+            logger.info("[generate-from-text] 解析落库成功 exercise_id=%s 状态已设为 done", exercise_id)
+        except Exception as e:
+            logger.exception("[generate-from-text] 解析或落库失败 exercise_id=%s: %s", exercise_id, e)
+            try:
+                await db.rollback()  # 先回滚，否则 session 处于 PendingRollback 无法再查询
+                result = await db.execute(select(Exercise).where(Exercise.id == exercise_id))
+                ex = result.scalars().first()
+                if ex:
+                    ex.status = "failed"
+                    await db.commit()
+                    logger.info("[generate-from-text] 已将练习状态设为 failed exercise_id=%s", exercise_id)
+                else:
+                    logger.warning("[generate-from-text] 未找到练习无法设为 failed exercise_id=%s", exercise_id)
+            except Exception as e2:
+                logger.exception("[generate-from-text] 更新状态为 failed 时出错: %s", e2)
+                await db.rollback()
     yield "\n"
     payload: dict = {"exerciseId": exercise_id}
     if final_usage is not None:
@@ -306,14 +310,14 @@ def _exercise_title_from_request(title: str | None, content: str) -> str:
 
 
 @router.post("/exercises/generate-from-text")
-def generate_from_text(
+async def generate_from_text(
     body: GenerateFromTextRequest,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     流式生成题目。响应为 text/event-stream 或普通流式文本，最后一行为 JSON：{"exerciseId": "xxx"}。
     """
-    user = get_or_create_dev_user(db)
+    user = await get_or_create_dev_user(db)
     exercise_id = str(uuid.uuid4())
     title = _exercise_title_from_request(body.title, body.content)
     exercise = Exercise(
@@ -326,7 +330,7 @@ def generate_from_text(
         source_doc_id=None,
     )
     db.add(exercise)
-    db.commit()
+    await db.commit()
 
     # 组合用户意图（标题/题型/难度/数量/要点/分析）
     intent_parts = [
@@ -342,10 +346,10 @@ def generate_from_text(
     intent_text = "\n".join([x for x in intent_parts if x.strip()])
 
     # 第二次调用前：RAG 检索知识库，召回结果输出到日志与调试文件
-    rag_nodes, rag_text = retrieve_for_question_generation(body.content)
-    _log_rag_recall(exercise_id, rag_nodes)
-    def gen():
-        return _stream_generate(
+    rag_nodes, rag_text = await retrieve_for_question_generation(body.content)
+    await _log_rag_recall(exercise_id, rag_nodes)
+    async def gen():
+        async for chunk in _stream_generate(
             content=body.content,
             question_type=body.question_type,
             difficulty=body.difficulty,
@@ -353,7 +357,8 @@ def generate_from_text(
             exercise_id=exercise_id,
             rag_context=rag_text or None,
             intent_context=intent_text,
-        )
+        ):
+            yield chunk
 
     return StreamingResponse(
         gen(),
@@ -384,23 +389,24 @@ class ExerciseDetailResponse(BaseModel):
 
 
 @router.get("/exercises/{exercise_id}", response_model=ExerciseDetailResponse)
-def get_exercise_detail(
+async def get_exercise_detail(
     exercise_id: str,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     获取练习详情。status 为 generating 时前端可轮询；ready 表示可作答。
     """
-    get_or_create_dev_user(db)
-    exercise = db.query(Exercise).filter(Exercise.id == exercise_id).first()
+    await get_or_create_dev_user(db)
+    result = await db.execute(select(Exercise).where(Exercise.id == exercise_id))
+    exercise = result.scalars().first()
     if not exercise:
         raise HTTPException(status_code=404, detail="exercise not found")
-    questions = (
-        db.query(Question)
-        .filter(Question.exercise_id == exercise_id)
+    questions_result = await db.execute(
+        select(Question)
+        .where(Question.exercise_id == exercise_id)
         .order_by(Question.created_at.asc())
-        .all()
     )
+    questions = questions_result.scalars().all()
     status_api = STATUS_TO_API.get(exercise.status, exercise.status)
     question_items = []
     for q in questions:
@@ -418,15 +424,15 @@ def get_exercise_detail(
         )
     created_at = exercise.created_at.isoformat() if exercise.created_at else ""
     # 若已提交过，返回最后一次得分
-    last_result = (
-        db.query(ExerciseResult)
-        .filter(
+    last_result_res = await db.execute(
+        select(ExerciseResult)
+        .where(
             ExerciseResult.exercise_id == exercise_id,
             ExerciseResult.owner_id == DEV_USER_ID,
         )
         .order_by(ExerciseResult.submitted_at.desc())
-        .first()
     )
+    last_result = last_result_res.scalars().first()
     score = last_result.score if last_result else None
     return ExerciseDetailResponse(
         exerciseId=exercise.id,
@@ -464,27 +470,31 @@ class SubmitResponse(BaseModel):
 
 
 @router.post("/exercises/{exercise_id}/submit", response_model=SubmitResponse)
-def submit_exercise(
+async def submit_exercise(
     exercise_id: str,
     body: SubmitRequest,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     提交答案，返回得分、正确率及每题对错与解析。
     """
-    user = get_or_create_dev_user(db)
-    exercise = db.query(Exercise).filter(Exercise.id == exercise_id).first()
+    user = await get_or_create_dev_user(db)
+    exercise_result = await db.execute(select(Exercise).where(Exercise.id == exercise_id))
+    exercise = exercise_result.scalars().first()
     if not exercise:
         raise HTTPException(status_code=404, detail="exercise not found")
-    questions = (
-        db.query(Question).filter(Question.exercise_id == exercise_id).all()
-    )
+    questions_result = await db.execute(select(Question).where(Question.exercise_id == exercise_id))
+    questions = questions_result.scalars().all()
     q_by_id = {q.id: q for q in questions}
     answers_by_qid = {
         a.question_id: a
-        for a in db.query(Answer).filter(
-            Answer.question_id.in_(q_by_id.keys())
-        ).all()
+        for a in (
+            await db.execute(
+                select(Answer).where(Answer.question_id.in_(q_by_id.keys()))
+            )
+        )
+        .scalars()
+        .all()
     }
     user_answers = {a.questionId: a.answer for a in body.answers}
     results: list[ResultItem] = []
@@ -528,7 +538,7 @@ def submit_exercise(
         result_details=result_details,
     )
     db.add(er)
-    db.commit()
+    await db.commit()
     return SubmitResponse(
         score=score,
         correctRate=round(correct_rate, 2),
@@ -548,63 +558,75 @@ class ExerciseListItem(BaseModel):
 
 
 @router.delete("/exercises/{exercise_id}", status_code=204)
-def delete_exercise(
+async def delete_exercise(
     exercise_id: str,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     删除练习。会一并删除该练习下的题目、答案、作答记录。
     """
-    get_or_create_dev_user(db)
-    exercise = db.query(Exercise).filter(Exercise.id == exercise_id).first()
+    await get_or_create_dev_user(db)
+    exercise_result = await db.execute(select(Exercise).where(Exercise.id == exercise_id))
+    exercise = exercise_result.scalars().first()
     if not exercise:
         raise HTTPException(status_code=404, detail="exercise not found")
-    question_ids = [q.id for q in db.query(Question).filter(Question.exercise_id == exercise_id).all()]
-    db.query(ExerciseResult).filter(ExerciseResult.exercise_id == exercise_id).delete()
+    question_result = await db.execute(select(Question.id).where(Question.exercise_id == exercise_id))
+    question_ids = [row[0] for row in question_result.all()]
+    await db.execute(
+        ExerciseResult.__table__.delete().where(ExerciseResult.exercise_id == exercise_id)
+    )
     if question_ids:
-        db.query(Answer).filter(Answer.question_id.in_(question_ids)).delete()
-    db.query(Question).filter(Question.exercise_id == exercise_id).delete()
+        await db.execute(Answer.__table__.delete().where(Answer.question_id.in_(question_ids)))
+    await db.execute(Question.__table__.delete().where(Question.exercise_id == exercise_id))
     db.delete(exercise)
-    db.commit()
+    await db.commit()
 
 
 @router.get("/exercises", response_model=dict)
-def list_exercises(
+async def list_exercises(
     page: int = Query(1, ge=1),
     pageSize: int = Query(10, ge=1, le=100),
     keyword: str | None = Query(None, description="按练习标题关键词筛选"),
     difficulty: str | None = Query(None, description="按难度筛选：easy / medium / hard"),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     练习列表（历史练习）。支持 keyword（标题）、difficulty 筛选。返回 items 与 total。
     """
-    user = get_or_create_dev_user(db)
-    q = db.query(Exercise).filter(Exercise.owner_id == DEV_USER_ID)
+    user = await get_or_create_dev_user(db)
+    q = select(Exercise).where(Exercise.owner_id == DEV_USER_ID)
     if keyword is not None and keyword.strip():
-        q = q.filter(Exercise.title.ilike(f"%{keyword.strip()}%"))
+        q = q.where(Exercise.title.ilike(f"%{keyword.strip()}%"))
     if difficulty is not None and difficulty.strip():
-        q = q.filter(Exercise.difficulty == difficulty.strip())
-    total = q.count()
-    items = (
+        q = q.where(Exercise.difficulty == difficulty.strip())
+    count_stmt = select(func.count()).select_from(Exercise).where(Exercise.owner_id == DEV_USER_ID)
+    if keyword is not None and keyword.strip():
+        count_stmt = count_stmt.where(Exercise.title.ilike(f"%{keyword.strip()}%"))
+    if difficulty is not None and difficulty.strip():
+        count_stmt = count_stmt.where(Exercise.difficulty == difficulty.strip())
+    total = (await db.execute(count_stmt)).scalar_one()
+    result = await db.execute(
         q.order_by(Exercise.created_at.desc())
         .offset((page - 1) * pageSize)
         .limit(pageSize)
-        .all()
     )
+    items = result.scalars().all()
     out_items = []
     for ex in items:
         status_api = STATUS_TO_API.get(ex.status, ex.status)
-        question_count = db.query(Question).filter(Question.exercise_id == ex.id).count()
-        last_result = (
-            db.query(ExerciseResult)
-            .filter(
+        qcount_res = await db.execute(
+            select(func.count()).select_from(Question).where(Question.exercise_id == ex.id)
+        )
+        question_count = qcount_res.scalar_one()
+        last_result_res = await db.execute(
+            select(ExerciseResult)
+            .where(
                 ExerciseResult.exercise_id == ex.id,
                 ExerciseResult.owner_id == user.id,
             )
             .order_by(ExerciseResult.submitted_at.desc())
-            .first()
         )
+        last_result = last_result_res.scalars().first()
         score = last_result.score if last_result else None
         out_items.append(
             ExerciseListItem(

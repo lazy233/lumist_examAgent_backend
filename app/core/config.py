@@ -11,7 +11,7 @@ class Settings:
     environment: str = os.getenv("ENVIRONMENT", "development")
     database_url: str = os.getenv(
         "DATABASE_URL",
-        "postgresql+psycopg2://postgres:123456@localhost:5432/lumist_exam_agent",
+        "postgresql+asyncpg://postgres:123456@localhost:5432/lumist_exam_agent",
     )
     db_echo: bool = os.getenv("DB_ECHO", "false").lower() == "true"
     data_root: str = os.getenv("DATA_ROOT", "data")

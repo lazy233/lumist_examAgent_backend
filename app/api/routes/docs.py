@@ -7,12 +7,13 @@ from urllib.parse import quote
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.responses import StreamingResponse
-from sqlalchemy.orm import Session
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.models.doc import Doc
 from app.repositories.user_repository import DEV_USER_ID, get_or_create_dev_user
-from app.services.storage_service import delete_doc_files, save_to_library, save_upload
+from app.services.storage_service import delete_doc_files_async, save_to_library_async, save_upload_async
 
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".pptx", ".txt"}
 
@@ -23,7 +24,7 @@ router = APIRouter()
 async def upload_material(
     file: UploadFile = File(...),
     saveToLibrary: str = Form("false"),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     我的资料页：仅保存文件，不解析、不总结、不向量化。
@@ -38,15 +39,15 @@ async def upload_material(
             detail=f"Unsupported file type. Allowed: {', '.join(ALLOWED_EXTENSIONS)}",
         )
 
-    user = get_or_create_dev_user(db)
+    user = await get_or_create_dev_user(db)
     doc_id = str(uuid.uuid4())
     filename = file.filename or f"upload{suffix}"
 
-    file_path, file_hash, file_size = save_upload(file.file, filename, doc_id)
+    file_path, file_hash, file_size = await save_upload_async(file.file, filename, doc_id)
     save_to_lib = saveToLibrary.lower() == "true"
 
     if save_to_lib:
-        save_to_library(file_path, doc_id, filename)
+        await save_to_library_async(file_path, doc_id, filename)
 
     doc = Doc(
         id=doc_id,
@@ -59,7 +60,7 @@ async def upload_material(
         save_to_library=save_to_lib,
     )
     db.add(doc)
-    db.commit()
+    await db.commit()
 
     return {"docId": doc_id, "fileName": filename, "status": "uploaded"}
 
@@ -68,7 +69,7 @@ async def upload_material(
 async def upload_doc(
     file: UploadFile = File(...),
     saveToLibrary: str = Form("false"),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     suffix = ""
     if file.filename and "." in file.filename:
@@ -79,15 +80,15 @@ async def upload_doc(
             detail=f"Unsupported file type. Allowed: {', '.join(ALLOWED_EXTENSIONS)}",
         )
 
-    user = get_or_create_dev_user(db)
+    user = await get_or_create_dev_user(db)
     doc_id = str(uuid.uuid4())
     filename = file.filename or f"upload{suffix}"
 
-    file_path, file_hash, file_size = save_upload(file.file, filename, doc_id)
+    file_path, file_hash, file_size = await save_upload_async(file.file, filename, doc_id)
     save_to_lib = saveToLibrary.lower() == "true"
 
     if save_to_lib:
-        save_to_library(file_path, doc_id, filename)
+        await save_to_library_async(file_path, doc_id, filename)
 
     doc = Doc(
         id=doc_id,
@@ -100,7 +101,7 @@ async def upload_doc(
         save_to_library=save_to_lib,
     )
     db.add(doc)
-    db.commit()
+    await db.commit()
 
     return {"docId": doc_id, "fileName": filename, "status": "uploaded"}
 
@@ -131,9 +132,10 @@ def _sse_event(data: dict, event: str | None = None) -> str:
 
 
 @router.get("/docs/{doc_id}/file")
-def get_doc_file(doc_id: str, db: Session = Depends(get_db)):
+async def get_doc_file(doc_id: str, db: AsyncSession = Depends(get_db)):
     """获取文件内容以便前端预览。返回文件流，带正确的 Content-Type。"""
-    doc = db.query(Doc).filter(Doc.id == doc_id).first()
+    result = await db.execute(select(Doc).where(Doc.id == doc_id))
+    doc = result.scalars().first()
     if not doc:
         raise HTTPException(status_code=404, detail="doc not found")
     path = Path(doc.file_path)
@@ -155,47 +157,55 @@ def get_doc_file(doc_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/docs/{doc_id}")
-def get_doc(doc_id: str, db: Session = Depends(get_db)):
-    doc = db.query(Doc).filter(Doc.id == doc_id).first()
+async def get_doc(doc_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Doc).where(Doc.id == doc_id))
+    doc = result.scalars().first()
     if not doc:
         raise HTTPException(status_code=404, detail="doc not found")
     return _doc_to_item(doc)
 
 
 @router.get("/docs")
-def list_docs(
+async def list_docs(
     keyword: str | None = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=100, alias="pageSize"),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
-    get_or_create_dev_user(db)
-    q = db.query(Doc).filter(Doc.owner_id == DEV_USER_ID)
+    await get_or_create_dev_user(db)
+    q = select(Doc).where(Doc.owner_id == DEV_USER_ID)
     if keyword:
-        q = q.filter(Doc.file_name.ilike(f"%{keyword}%"))
-    total = q.count()
-    items = q.order_by(Doc.created_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
+        q = q.where(Doc.file_name.ilike(f"%{keyword}%"))
+    count_stmt = select(func.count()).select_from(Doc).where(Doc.owner_id == DEV_USER_ID)
+    if keyword:
+        count_stmt = count_stmt.where(Doc.file_name.ilike(f"%{keyword}%"))
+    total = (await db.execute(count_stmt)).scalar_one()
+    result = await db.execute(
+        q.order_by(Doc.created_at.desc()).offset((page - 1) * page_size).limit(page_size)
+    )
+    items = result.scalars().all()
     return {"items": [_doc_to_item(d) for d in items], "total": total}
 
 
 @router.post("/docs/{doc_id}/parse")
-def parse_doc(doc_id: str, db: Session = Depends(get_db)):
+async def parse_doc(doc_id: str, db: AsyncSession = Depends(get_db)):
     from app.services.doc_parse_service import parse_and_index_stream
 
-    doc = db.query(Doc).filter(Doc.id == doc_id).first()
+    result = await db.execute(select(Doc).where(Doc.id == doc_id))
+    doc = result.scalars().first()
     if not doc:
         raise HTTPException(status_code=404, detail="doc not found")
 
-    def gen():
+    async def gen():
         # 1) 标记解析中
         doc.status = "parsing"
-        db.commit()
+        await db.commit()
         yield _sse_event({"docId": doc.id, "status": "parsing"}, event="status")
 
         try:
             # 2) 调用大模型解析（流式）
             yield _sse_event({"stage": "summarize"}, event="progress")
-            for chunk in parse_and_index_stream(
+            async for chunk in parse_and_index_stream(
                 file_path=doc.file_path,
                 doc_id=doc.id,
                 owner_id=doc.owner_id,
@@ -205,8 +215,8 @@ def parse_doc(doc_id: str, db: Session = Depends(get_db)):
                 if chunk:
                     yield _sse_event({"content": chunk}, event="chunk")
             doc.status = "done"
-            db.commit()
-            db.refresh(doc)
+            await db.commit()
+            await db.refresh(doc)
 
             # 3) 返回解析结果
             parsed = {
@@ -222,7 +232,7 @@ def parse_doc(doc_id: str, db: Session = Depends(get_db)):
             )
         except Exception as e:
             doc.status = "failed"
-            db.commit()
+            await db.commit()
             yield _sse_event(
                 {"docId": doc.id, "status": "failed", "detail": str(e)},
                 event="error",
@@ -236,10 +246,11 @@ def parse_doc(doc_id: str, db: Session = Depends(get_db)):
 
 
 @router.delete("/docs/{doc_id}", status_code=204)
-def delete_doc(doc_id: str, db: Session = Depends(get_db)):
-    doc = db.query(Doc).filter(Doc.id == doc_id).first()
+async def delete_doc(doc_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Doc).where(Doc.id == doc_id))
+    doc = result.scalars().first()
     if not doc:
         raise HTTPException(status_code=404, detail="doc not found")
-    delete_doc_files(doc)
+    await delete_doc_files_async(doc)
     db.delete(doc)
-    db.commit()
+    await db.commit()

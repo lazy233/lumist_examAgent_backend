@@ -1,22 +1,22 @@
 """大模型服务，用于文档总结等。API Key 硬编码，上线前需改为环境变量。"""
 import json
 import os
-from typing import Any, Iterator
+from typing import Any, AsyncIterator
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 # 绕过代理，避免 SSL 连接错误
 os.environ.update({"HTTP_PROXY": "", "HTTPS_PROXY": "", "NO_PROXY": "*"})
 
 _DEFAULT_API_KEY = "sk-ed09584eec034991a5a7029342c05d98"
-_client: OpenAI | None = None
+_client: AsyncOpenAI | None = None
 
 
-def get_openai_client() -> OpenAI:
+def get_openai_client() -> AsyncOpenAI:
     """供出题等模块使用的 OpenAI 兼容客户端（阿里云百炼）。"""
     global _client
     if _client is None:
-        _client = OpenAI(
+        _client = AsyncOpenAI(
             api_key=os.getenv("OPENAI_API_KEY", _DEFAULT_API_KEY),
             base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
         )
@@ -41,7 +41,7 @@ def parse_summary_content(content: str) -> dict[str, Any]:
         }
 
 
-def summarize_document(text: str) -> dict[str, Any]:
+async def summarize_document(text: str) -> dict[str, Any]:
     """
     让大模型总结文档，返回结构化数据。
     返回: { school, major, course, knowledgePoints: [...], summary }
@@ -69,7 +69,7 @@ def summarize_document(text: str) -> dict[str, Any]:
     prompt += text[:8000]  # 限制长度，避免超 token
 
     client = get_openai_client()
-    completion = client.chat.completions.create(
+    completion = await client.chat.completions.create(
         model="MiniMax-M2.1",
         messages=[{"role": "user", "content": prompt}],
         extra_body={"enable_thinking": True},
@@ -78,7 +78,7 @@ def summarize_document(text: str) -> dict[str, Any]:
     return parse_summary_content(content)
 
 
-def stream_summarize_document(text: str) -> Iterator[str]:
+async def stream_summarize_document(text: str) -> AsyncIterator[str]:
     """
     以流式方式让模型总结文档，仅 yield content 片段。
     调用方需自行拼接完整内容并做 JSON 解析。
@@ -101,13 +101,13 @@ def stream_summarize_document(text: str) -> Iterator[str]:
     prompt += text[:8000]  # 限制长度，避免超 token
 
     client = get_openai_client()
-    completion = client.chat.completions.create(
+    completion = await client.chat.completions.create(
         model="MiniMax-M2.1",
         messages=[{"role": "user", "content": prompt}],
         extra_body={"enable_thinking": True},
         stream=True,
     )
-    for chunk in completion:
+    async for chunk in completion:
         if not getattr(chunk, "choices", None):
             continue
         delta = chunk.choices[0].delta

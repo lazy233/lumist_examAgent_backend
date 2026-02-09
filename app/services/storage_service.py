@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import shutil
 from pathlib import Path
@@ -51,3 +52,27 @@ def delete_doc_files(doc: Doc) -> None:
                 lib_path.unlink()
             except OSError:
                 pass
+
+
+def _save_upload_sync(file_obj: BinaryIO, filename: str, doc_id: str) -> Tuple[str, str, int]:
+    return save_upload(file_obj, filename, doc_id)
+
+
+def _save_to_library_sync(source_path: str, doc_id: str, filename: str) -> str:
+    return save_to_library(source_path, doc_id, filename)
+
+
+def _delete_doc_files_sync(doc: Doc) -> None:
+    return delete_doc_files(doc)
+
+
+async def save_upload_async(file_obj: BinaryIO, filename: str, doc_id: str) -> Tuple[str, str, int]:
+    return await asyncio.to_thread(_save_upload_sync, file_obj, filename, doc_id)
+
+
+async def save_to_library_async(source_path: str, doc_id: str, filename: str) -> str:
+    return await asyncio.to_thread(_save_to_library_sync, source_path, doc_id, filename)
+
+
+async def delete_doc_files_async(doc: Doc) -> None:
+    await asyncio.to_thread(_delete_doc_files_sync, doc)

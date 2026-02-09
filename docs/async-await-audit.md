@@ -1,5 +1,88 @@
 # 全链路 async/await 异步编程符合性检查报告
 
+本文档评估当前后端是否满足「全链路采用 async/await 异步编程模式」的要求，仅作现状分析，不包含代码改造。
+
+---
+
+## 一、结论
+
+**当前项目不满足全链路 async/await 要求。**  
+原因：数据库、网络调用、文件 I/O 与多数路由仍为同步（sync）实现，存在大量阻塞点。
+
+---
+
+## 二、路由层现状
+
+### 2.1 异步路由（`async def`）
+- `app/api/routes/docs.py`: `upload_material()`, `upload_doc()`
+- `app/api/routes/exercises.py`: `analyze_file()`
+
+**问题**：这些接口内部仍调用同步 DB / 文件 / HTTP，事件循环无法形成真正异步链路。
+
+### 2.2 同步路由（`def`，线程池执行）
+- `app/api/routes/auth.py`: `login()`, `register()`
+- `app/api/routes/docs.py`: `get_doc_file()`, `get_doc()`, `list_docs()`, `parse_doc()`, `delete_doc()`
+- `app/api/routes/exercises.py`: `analyze()`, `generate_from_text()`, `get_exercise_detail()`, `submit_exercise()`, `delete_exercise()`, `list_exercises()`
+- `app/api/routes/user.py`: `get_profile()`, `update_profile()`
+- `app/api/routes/health.py`: `health_check()`
+
+---
+
+## 三、数据库层（同步阻塞）
+
+数据库使用 **同步 SQLAlchemy + psycopg2**：
+- `app/core/db.py` 使用 `create_engine()`（同步引擎）
+- `SessionLocal` 为同步 Session
+- `get_db()` 为同步依赖
+- `db.query/add/commit/refresh` 均为同步阻塞
+
+---
+
+## 四、外部网络调用（同步阻塞）
+
+- `app/services/llm_service.py`：同步 `OpenAI` 客户端
+- `app/services/exercise_service.py`：同步流式 LLM 调用
+- `app/services/file_analyze_service.py`：同步上传与调用
+- `app/services/bailian_retrieve_service.py`：同步百炼 SDK
+
+---
+
+## 五、文件 I/O（同步阻塞）
+
+全量文件操作为同步：
+- `open()` / `Path.read_text()` / `Path.unlink()`
+- 文档解析（PDF/DOCX/TXT/PPTX）同步加载器
+- 上传保存使用同步写入（`storage_service.py`）
+
+---
+
+## 六、流式响应
+
+流式实现仍为同步生成器：
+- 练习生成：`stream_raw_and_collect()` / `_stream_generate()`
+- 文档解析 SSE：同步生成器驱动
+
+**结论**：流式逻辑仍阻塞线程池，非异步链路。
+
+---
+
+## 七、关键依赖异步能力
+
+| 组件 | 当前实现 | 结论 |
+|------|----------|------|
+| SQLAlchemy | 同步 engine/session | 非异步 |
+| 数据库驱动 | psycopg2 | 非异步 |
+| OpenAI 客户端 | 同步 OpenAI | 非异步 |
+| 百炼 SDK | 同步 | 非异步 |
+| 文件 I/O | open / Path / shutil | 非异步 |
+
+---
+
+## 八、结论汇总
+
+项目目前是**同步为主**的 FastAPI 架构，仅局部接口使用 `async def`，且内部仍为同步阻塞。  
+# 全链路 async/await 异步编程符合性检查报告
+
 本文档汇总当前代码库与「全链路采用 async/await 异步编程模式」的差异，仅作问题记录，不包含修改方案实现。
 
 ---

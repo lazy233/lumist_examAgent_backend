@@ -110,6 +110,8 @@ class GenerateFromTextRequest(BaseModel):
     question_type: str = Field(default="single_choice", alias="questionType")
     difficulty: str = Field(default="medium")
     count: int = Field(default=5, ge=1, le=50)
+    key_points: list[str] | None = Field(default=None, alias="keyPoints", description="分析得到的要点")
+    analysis: str | None = Field(default=None, description="分析结果或用户意图补充")
 
 
 class AnalyzeFileResponse(BaseModel):
@@ -227,6 +229,7 @@ def _stream_generate(
     count: int,
     exercise_id: str,
     rag_context: str | None = None,
+    intent_context: str | None = None,
 ):
     """
     流式生成：先 yield 模型内容，收集完整后用新 session 解析落库，最后 yield 一行 JSON exerciseId。
@@ -242,6 +245,7 @@ def _stream_generate(
             difficulty=difficulty,
             count=count,
             rag_context=rag_context,
+            intent_context=intent_context,
         ):
             if isinstance(chunk, dict) and "_usage" in chunk:
                 final_usage = chunk["_usage"]
@@ -324,10 +328,22 @@ def generate_from_text(
     db.add(exercise)
     db.commit()
 
+    # 组合用户意图（标题/题型/难度/数量/要点/分析）
+    intent_parts = [
+        f"标题：{title}",
+        f"题型：{QUESTION_TYPE_LABELS.get(body.question_type, body.question_type)}",
+        f"难度：{DIFFICULTY_LABELS.get(body.difficulty, body.difficulty)}",
+        f"数量：{body.count}",
+    ]
+    if body.key_points:
+        intent_parts.append("要点：" + "；".join([str(x) for x in body.key_points if str(x).strip()]))
+    if body.analysis:
+        intent_parts.append("分析：" + body.analysis.strip())
+    intent_text = "\n".join([x for x in intent_parts if x.strip()])
+
     # 第二次调用前：RAG 检索知识库，召回结果输出到日志与调试文件
     rag_nodes, rag_text = retrieve_for_question_generation(body.content)
     _log_rag_recall(exercise_id, rag_nodes)
-
     def gen():
         return _stream_generate(
             content=body.content,
@@ -336,6 +352,7 @@ def generate_from_text(
             count=body.count,
             exercise_id=exercise_id,
             rag_context=rag_text or None,
+            intent_context=intent_text,
         )
 
     return StreamingResponse(

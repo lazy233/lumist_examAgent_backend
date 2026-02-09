@@ -145,6 +145,7 @@ def stream_raw_and_collect(
     difficulty: str,
     count: int,
     rag_context: str | None = None,
+    intent_context: str | None = None,
 ) -> Iterator[str | dict[str, Any]]:
     """
     流式调用模型生成题目内容，逐个 yield 文本片段（仅 content，不含 reasoning）；
@@ -152,7 +153,14 @@ def stream_raw_and_collect(
     若传入 rag_context，会在 prompt 中先加入「知识库参考」再拼用户材料。
     调用方需收集完整响应后解析并落库。
     """
-    prompt = _build_questions_prompt(content, question_type, difficulty, count, rag_context=rag_context)
+    prompt = _build_questions_prompt(
+        content,
+        question_type,
+        difficulty,
+        count,
+        rag_context=rag_context,
+        intent_context=intent_context,
+    )
     logger.info(
         "[第二次调大模型-完整提示词]\n%s\n%s\n%s",
         "=" * 60,
@@ -193,10 +201,12 @@ def _build_questions_prompt(
     difficulty: str,
     count: int,
     rag_context: str | None = None,
+    intent_context: str | None = None,
 ) -> str:
     type_cn = QUESTION_TYPE_LABELS.get(question_type, question_type)
     diff_cn = DIFFICULTY_LABELS.get(difficulty, difficulty)
-    prompt = f"""请根据以下材料，生成 {count} 道{type_cn}（难度：{diff_cn}）。只输出题目正文，不要输出任何 JSON，不要输出 exerciseId。
+    prompt = f"""你是出题助手。请严格以【用户意图】为主生成题目，知识库仅作参考；若知识库内容与用户意图不一致，请在生成时自行忽略知识库内容。
+请根据材料生成 {count} 道{type_cn}（难度：{diff_cn}）。只输出题目正文，不要输出任何 JSON，不要输出 exerciseId。
 
 【格式要求】
 1. 题目之间用空行分隔（每道题之间至少一个空行）。
@@ -221,10 +231,11 @@ D. 机器语言
 答案：list 可变，tuple 不可变；list 用 []，tuple 用 ()。
 
 """
+    if intent_context and (intent_context := intent_context.strip()):
+        prompt += "【用户意图】\n" + intent_context[:2000] + "\n\n"
     if rag_context and (rag_context := rag_context.strip()):
-        prompt += "【知识库参考】\n" + rag_context[:4000] + "\n\n【用户材料】\n"
-    else:
-        prompt += "材料：\n"
+        prompt += "【知识库参考】\n" + rag_context[:4000] + "\n\n"
+    prompt += "【用户材料】\n"
     prompt += (content.strip() or "")[:6000]
     return prompt
 

@@ -5,8 +5,8 @@ from pydantic import BaseModel, Field
 
 from sqlalchemy.orm import Session
 
+from app.api.deps import get_current_user
 from app.core.db import get_db
-from app.repositories.user_repository import get_or_create_dev_user
 from app.models.user import User
 
 router = APIRouter()
@@ -59,16 +59,18 @@ def _user_to_profile_response(user: User) -> UserProfileResponse:
 
 
 @router.get("/profile", response_model=UserProfileResponse)
-def get_profile(db: Session = Depends(get_db)):
+def get_profile(user: User = Depends(get_current_user)):
     """获取当前用户个人资料（个人中心展示）。"""
-    user = get_or_create_dev_user(db)
     return _user_to_profile_response(user)
 
 
 @router.put("/profile", response_model=UserProfileResponse)
-def update_profile(body: UserProfileUpdate, db: Session = Depends(get_db)):
+def update_profile(
+    body: UserProfileUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
     """更新当前用户个人资料（个人中心保存）。"""
-    user = get_or_create_dev_user(db)
     if body.name is not None:
         user.name = body.name
     if body.school is not None:

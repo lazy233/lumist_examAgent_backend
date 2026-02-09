@@ -5,6 +5,9 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class Settings:
     api_prefix: str = os.getenv("API_PREFIX", "/api")
+    secret_key: str = os.getenv("SECRET_KEY", "change-me-in-production")
+    jwt_algorithm: str = os.getenv("JWT_ALGORITHM", "HS256")
+    access_token_expire_minutes: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "10080"))  # 7 days
     environment: str = os.getenv("ENVIRONMENT", "development")
     database_url: str = os.getenv(
         "DATABASE_URL",

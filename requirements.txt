@@ -1,5 +1,8 @@
 fastapi
 uvicorn[standard]
+PyJWT
+passlib[bcrypt]
+bcrypt==4.1.3
 langchain
 pydantic
 sqlalchemy

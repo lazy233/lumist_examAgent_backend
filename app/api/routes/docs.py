@@ -7,11 +7,12 @@ from urllib.parse import quote
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.models.doc import Doc
+from app.models.exercise import Exercise
 from app.repositories.user_repository import DEV_USER_ID, get_or_create_dev_user
 from app.services.storage_service import delete_doc_files_async, save_to_library_async, save_upload_async
 
@@ -196,19 +197,24 @@ async def parse_doc(doc_id: str, db: AsyncSession = Depends(get_db)):
     if not doc:
         raise HTTPException(status_code=404, detail="doc not found")
 
+    # 在 commit 前取出所需字段，避免 commit 后 ORM 对象过期导致懒加载触发 MissingGreenlet
+    doc_id_val = doc.id
+    owner_id_val = doc.owner_id
+    file_path_val = doc.file_path
+
     async def gen():
         # 1) 标记解析中
         doc.status = "parsing"
         await db.commit()
-        yield _sse_event({"docId": doc.id, "status": "parsing"}, event="status")
+        yield _sse_event({"docId": doc_id_val, "status": "parsing"}, event="status")
 
         try:
             # 2) 调用大模型解析（流式）
             yield _sse_event({"stage": "summarize"}, event="progress")
             async for chunk in parse_and_index_stream(
-                file_path=doc.file_path,
-                doc_id=doc.id,
-                owner_id=doc.owner_id,
+                file_path=file_path_val,
+                doc_id=doc_id_val,
+                owner_id=owner_id_val,
                 db=db,
                 doc=doc,
             ):
@@ -227,14 +233,14 @@ async def parse_doc(doc_id: str, db: AsyncSession = Depends(get_db)):
                 "summary": doc.parsed_summary or "",
             }
             yield _sse_event(
-                {"docId": doc.id, "status": "done", "parsed": parsed},
+                {"docId": doc_id_val, "status": "done", "parsed": parsed},
                 event="result",
             )
         except Exception as e:
             doc.status = "failed"
             await db.commit()
             yield _sse_event(
-                {"docId": doc.id, "status": "failed", "detail": str(e)},
+                {"docId": doc_id_val, "status": "failed", "detail": str(e)},
                 event="error",
             )
 
@@ -247,10 +253,21 @@ async def parse_doc(doc_id: str, db: AsyncSession = Depends(get_db)):
 
 @router.delete("/docs/{doc_id}", status_code=204)
 async def delete_doc(doc_id: str, db: AsyncSession = Depends(get_db)):
+    """
+    删除资料。按外键依赖先解除练习对该资料的引用，再删磁盘文件，最后删 doc 记录，避免外键约束错误。
+    """
     result = await db.execute(select(Doc).where(Doc.id == doc_id))
     doc = result.scalars().first()
     if not doc:
         raise HTTPException(status_code=404, detail="doc not found")
+
+    # 1) 解除 exercises 对当前 doc 的引用，避免删 doc 时触发外键约束
+    await db.execute(
+        update(Exercise).where(Exercise.source_doc_id == doc_id).values(source_doc_id=None)
+    )
+    await db.flush()
+    # 2) 删除磁盘上的文件（需在删 doc 前执行，依赖 doc 的 file_path 等）
     await delete_doc_files_async(doc)
-    db.delete(doc)
+    # 3) 删除 doc 记录
+    await db.execute(Doc.__table__.delete().where(Doc.id == doc_id))
     await db.commit()

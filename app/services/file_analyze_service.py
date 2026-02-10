@@ -9,6 +9,8 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
+from app.core.config import settings
+
 logger = logging.getLogger(__name__)
 
 # 与 llm_service 一致：绕过代理
@@ -81,7 +83,7 @@ async def analyze_file_for_questions(file_path: str | Path) -> tuple[str, str, d
 若需要建议标题，请在第一行写：标题：xxx ，换行后再写正文；否则直接写正文。"""
 
     completion = await client.chat.completions.create(
-        model="qwen-long",
+        model=settings.file_analyze_model,
         messages=[
             {"role": "system", "content": f"fileid://{file_id}"},
             {"role": "user", "content": user_prompt},

@@ -42,12 +42,14 @@ CREATE TABLE IF NOT EXISTS exercises (
     status VARCHAR(20) NOT NULL DEFAULT 'generating',
     difficulty VARCHAR(20) NOT NULL,
     count INT NOT NULL,
+    question_type VARCHAR(30),
     source_doc_id VARCHAR(36) REFERENCES docs(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_exercises_owner_id ON exercises(owner_id);
+CREATE INDEX IF NOT EXISTS idx_exercises_question_type ON exercises(question_type);
 CREATE INDEX IF NOT EXISTS idx_exercises_source_doc_id ON exercises(source_doc_id);
 
 CREATE TABLE IF NOT EXISTS questions (

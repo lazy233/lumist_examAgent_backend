@@ -5,6 +5,8 @@ from typing import Any, AsyncIterator
 
 from openai import AsyncOpenAI
 
+from app.core.config import settings
+
 # 绕过代理，避免 SSL 连接错误
 os.environ.update({"HTTP_PROXY": "", "HTTPS_PROXY": "", "NO_PROXY": "*"})
 
@@ -70,7 +72,7 @@ async def summarize_document(text: str) -> dict[str, Any]:
 
     client = get_openai_client()
     completion = await client.chat.completions.create(
-        model="MiniMax-M2.1",
+        model=settings.llm_model,
         messages=[{"role": "user", "content": prompt}],
         extra_body={"enable_thinking": True},
     )
@@ -102,7 +104,7 @@ async def stream_summarize_document(text: str) -> AsyncIterator[str]:
 
     client = get_openai_client()
     completion = await client.chat.completions.create(
-        model="MiniMax-M2.1",
+        model=settings.llm_model,
         messages=[{"role": "user", "content": prompt}],
         extra_body={"enable_thinking": True},
         stream=True,

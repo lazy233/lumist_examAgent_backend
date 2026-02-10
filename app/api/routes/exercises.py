@@ -3,12 +3,13 @@ import asyncio
 import json
 import logging
 import re
+import time
 import uuid
 
 import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, Response
 
 logger = logging.getLogger(__name__)
 from fastapi.responses import StreamingResponse
@@ -28,6 +29,7 @@ from app.services.exercise_service import (
     DIFFICULTY_LABELS,
     QUESTION_TYPE_LABELS,
     analyze_material,
+    analyze_rag_context,
     parse_and_save_questions,
     stream_raw_and_collect,
 )
@@ -86,7 +88,7 @@ class AnalyzeRequest(BaseModel):
     content: str = Field(default="", description="用户输入的文字材料")
     question_type: str = Field(default="single_choice", alias="questionType")
     difficulty: str = Field(default="medium")
-    count: int = Field(default=5, ge=1, le=50)
+    count: int = Field(default=5, ge=1, description="题目数量，无上限")
 
 
 class UsageInfo(BaseModel):
@@ -111,7 +113,7 @@ class GenerateFromTextRequest(BaseModel):
     title: str | None = Field(None, description="整张试卷大标题，来自分析接口，可选")
     question_type: str = Field(default="single_choice", alias="questionType")
     difficulty: str = Field(default="medium")
-    count: int = Field(default=5, ge=1, le=50)
+    count: int = Field(default=5, ge=1, description="题目数量，无上限")
     key_points: list[str] | None = Field(default=None, alias="keyPoints", description="分析得到的要点")
     analysis: str | None = Field(default=None, description="分析结果或用户意图补充")
 
@@ -126,11 +128,16 @@ class AnalyzeFileResponse(BaseModel):
 @router.post("/exercises/analyze", response_model=AnalyzeResponse)
 async def analyze(
     body: AnalyzeRequest,
+    response: Response,
     db: AsyncSession = Depends(get_db),
 ):
     """
     分析材料，返回出题要点。用户确认后再调用 /exercises/generate-from-text。
+
+    **注意**：此接口会调用大模型，响应时间通常为 20–60 秒。前端请将请求超时设为至少 **60 秒**（如 axios timeout: 60000），否则会报超时失败。
     """
+    response.headers["X-Recommended-Client-Timeout"] = "60000"
+    t0 = time.perf_counter()
     user = await get_or_create_dev_user(db)
     key_points, usage = await analyze_material(
         content=body.content,
@@ -148,6 +155,7 @@ async def analyze(
     if not title:
         title = "AI 出题练习"
 
+    logger.info("[analyze] 分析材料总耗时 %.2fs", time.perf_counter() - t0)
     usage_info = UsageInfo(**usage) if usage else None
     return AnalyzeResponse(
         keyPoints=key_points,
@@ -264,6 +272,10 @@ async def _stream_generate(
         return
     full = "".join(buffer)
     logger.info("[generate-from-text] 流式结束 exercise_id=%s 收集长度=%d", exercise_id, len(full))
+    # 调试：控制台打印大模型生成的完整内容
+    print("\n" + "=" * 60 + " [大模型生成题目-完整内容] exercise_id=%s " % exercise_id + "=" * 60)
+    print(full)
+    print("=" * 60 + " [完整内容结束] " + "=" * 60 + "\n")
     async with SessionLocal() as db:
         parse_ok = False
         try:
@@ -327,6 +339,7 @@ async def generate_from_text(
         status="generating",
         difficulty=body.difficulty,
         count=body.count,
+        question_type=body.question_type,
         source_doc_id=None,
     )
     db.add(exercise)
@@ -345,9 +358,22 @@ async def generate_from_text(
         intent_parts.append("分析：" + body.analysis.strip())
     intent_text = "\n".join([x for x in intent_parts if x.strip()])
 
-    # 第二次调用前：RAG 检索知识库，召回结果输出到日志与调试文件
+    # 第二次调用前：RAG 检索知识库，并对召回内容做梳理再作为知识库参考（此处耗时易导致「首包很慢」）
+    t0 = time.perf_counter()
     rag_nodes, rag_text = await retrieve_for_question_generation(body.content)
+    logger.info("[generate-from-text] RAG 检索耗时 %.2fs", time.perf_counter() - t0)
     await _log_rag_recall(exercise_id, rag_nodes)
+    if rag_text and rag_text.strip():
+        if getattr(settings, "skip_rag_analyze", False):
+            rag_context = rag_text.strip()
+            logger.info("[generate-from-text] 已跳过 RAG 梳理（SKIP_RAG_ANALYZE=true），使用原文")
+        else:
+            t1 = time.perf_counter()
+            rag_context = await analyze_rag_context(rag_text)
+            logger.info("[generate-from-text] RAG 梳理耗时 %.2fs", time.perf_counter() - t1)
+    else:
+        rag_context = None
+    logger.info("[generate-from-text] 首包前总耗时（RAG+梳理）%.2fs", time.perf_counter() - t0)
     async def gen():
         async for chunk in _stream_generate(
             content=body.content,
@@ -355,7 +381,7 @@ async def generate_from_text(
             difficulty=body.difficulty,
             count=body.count,
             exercise_id=exercise_id,
-            rag_context=rag_text or None,
+            rag_context=rag_context,
             intent_context=intent_text,
         ):
             yield chunk
@@ -383,6 +409,8 @@ class ExerciseDetailResponse(BaseModel):
     status: str
     difficulty: str
     count: int
+    questionType: str
+    questionTypeLabel: str
     questions: list[QuestionItem]
     createdAt: str
     score: int | None = None
@@ -423,6 +451,8 @@ async def get_exercise_detail(
             )
         )
     created_at = exercise.created_at.isoformat() if exercise.created_at else ""
+    question_type = exercise.question_type or (questions[0].type if questions else "single_choice")
+    question_type_label = QUESTION_TYPE_LABELS.get(question_type, question_type)
     # 若已提交过，返回最后一次得分
     last_result_res = await db.execute(
         select(ExerciseResult)
@@ -440,6 +470,8 @@ async def get_exercise_detail(
         status=status_api,
         difficulty=exercise.difficulty,
         count=exercise.count,
+        questionType=question_type,
+        questionTypeLabel=question_type_label,
         questions=question_items,
         createdAt=created_at,
         score=score,
@@ -552,6 +584,8 @@ class ExerciseListItem(BaseModel):
     status: str
     difficulty: str
     count: int
+    questionType: str
+    questionTypeLabel: str
     questionCount: int = Field(0, description="实际落库的题目数，用于核对是否插入成功")
     createdAt: str
     score: int | None = None
@@ -563,22 +597,28 @@ async def delete_exercise(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    删除练习。会一并删除该练习下的题目、答案、作答记录。
+    删除练习。按外键依赖顺序删除：作答记录 -> 答案 -> 题目 -> 练习，确保无外键约束错误。
     """
     await get_or_create_dev_user(db)
     exercise_result = await db.execute(select(Exercise).where(Exercise.id == exercise_id))
     exercise = exercise_result.scalars().first()
     if not exercise:
         raise HTTPException(status_code=404, detail="exercise not found")
+
     question_result = await db.execute(select(Question.id).where(Question.exercise_id == exercise_id))
     question_ids = [row[0] for row in question_result.all()]
+
+    # 按依赖顺序删除，每步 flush 确保子表先落盘再删父表，避免外键约束
     await db.execute(
         ExerciseResult.__table__.delete().where(ExerciseResult.exercise_id == exercise_id)
     )
+    await db.flush()
     if question_ids:
         await db.execute(Answer.__table__.delete().where(Answer.question_id.in_(question_ids)))
+        await db.flush()
     await db.execute(Question.__table__.delete().where(Question.exercise_id == exercise_id))
-    db.delete(exercise)
+    await db.flush()
+    await db.execute(Exercise.__table__.delete().where(Exercise.id == exercise_id))
     await db.commit()
 
 
@@ -588,10 +628,11 @@ async def list_exercises(
     pageSize: int = Query(10, ge=1, le=100),
     keyword: str | None = Query(None, description="按练习标题关键词筛选"),
     difficulty: str | None = Query(None, description="按难度筛选：easy / medium / hard"),
+    questionType: str | None = Query(None, alias="questionType", description="按题型筛选：single_choice / multiple_choice / judgment / fill_blank / short_answer"),
     db: AsyncSession = Depends(get_db),
 ):
     """
-    练习列表（历史练习）。支持 keyword（标题）、difficulty 筛选。返回 items 与 total。
+    练习列表（历史练习）。支持 keyword（标题）、difficulty、questionType（题型）筛选。返回 items 与 total。
     """
     user = await get_or_create_dev_user(db)
     q = select(Exercise).where(Exercise.owner_id == DEV_USER_ID)
@@ -599,11 +640,15 @@ async def list_exercises(
         q = q.where(Exercise.title.ilike(f"%{keyword.strip()}%"))
     if difficulty is not None and difficulty.strip():
         q = q.where(Exercise.difficulty == difficulty.strip())
+    if questionType is not None and questionType.strip():
+        q = q.where(Exercise.question_type == questionType.strip())
     count_stmt = select(func.count()).select_from(Exercise).where(Exercise.owner_id == DEV_USER_ID)
     if keyword is not None and keyword.strip():
         count_stmt = count_stmt.where(Exercise.title.ilike(f"%{keyword.strip()}%"))
     if difficulty is not None and difficulty.strip():
         count_stmt = count_stmt.where(Exercise.difficulty == difficulty.strip())
+    if questionType is not None and questionType.strip():
+        count_stmt = count_stmt.where(Exercise.question_type == questionType.strip())
     total = (await db.execute(count_stmt)).scalar_one()
     result = await db.execute(
         q.order_by(Exercise.created_at.desc())
@@ -614,6 +659,13 @@ async def list_exercises(
     out_items = []
     for ex in items:
         status_api = STATUS_TO_API.get(ex.status, ex.status)
+        q_type = ex.question_type
+        if not q_type:
+            first_q = await db.execute(
+                select(Question.type).where(Question.exercise_id == ex.id).order_by(Question.created_at.asc()).limit(1)
+            )
+            q_type = first_q.scalar_one_or_none() or "single_choice"
+        q_type_label = QUESTION_TYPE_LABELS.get(q_type, q_type)
         qcount_res = await db.execute(
             select(func.count()).select_from(Question).where(Question.exercise_id == ex.id)
         )
@@ -635,6 +687,8 @@ async def list_exercises(
                 status=status_api,
                 difficulty=ex.difficulty,
                 count=ex.count,
+                questionType=q_type,
+                questionTypeLabel=q_type_label,
                 questionCount=question_count,
                 createdAt=ex.created_at.isoformat() if ex.created_at else "",
                 score=score,

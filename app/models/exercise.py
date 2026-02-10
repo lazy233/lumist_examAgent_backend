@@ -13,4 +13,5 @@ class Exercise(Base, TimestampMixin):
     status = Column(String(20), nullable=False, default="generating")
     difficulty = Column(String(20), nullable=False)
     count = Column(Integer, nullable=False)
+    question_type = Column(String(30), nullable=True, index=True)
     source_doc_id = Column(String(36), ForeignKey("docs.id"), nullable=True, index=True)

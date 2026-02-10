@@ -30,6 +30,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./sql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
       - ./sql/migrations/001_add_user_profile_columns.sql:/docker-entrypoint-initdb.d/02-migration-user-profile.sql:ro
+      - ./sql/migrations/002_add_exercise_question_type.sql:/docker-entrypoint-initdb.d/03-migration-exercise-question-type.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s

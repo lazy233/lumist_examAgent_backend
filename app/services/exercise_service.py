@@ -395,9 +395,7 @@ async def parse_and_save_questions(
     解析模型返回的流式文本（题干 + 选项 + 答案 + 解析），写入 questions 与 answers 表，并更新 exercise 状态。
     答案与解析必须非空：若任一项为空则仅把该题题干+选项发给大模型补全一次；补全后仍为空则跳过该题不落库。
     """
-    from app.models.exercise import Exercise
-    from app.models.question import Question
-    from app.models.answer import Answer
+    from app.repositories.exercise_repository import add_answer, add_question, set_exercise_status
 
     items = _parse_questions_text(full_content)
     logger.info("[parse_and_save_questions] exercise_id=%s 解析出题目数=%d", exercise_id, len(items))
@@ -447,30 +445,25 @@ async def parse_and_save_questions(
             continue
 
         qid = str(uuid.uuid4())
-        question = Question(
-            id=qid,
+        await add_question(
+            db_session,
+            question_id=qid,
             exercise_id=exercise_id,
             type=question_type,
             stem=stem,
             options=options,
         )
-        db_session.add(question)
-        await db_session.flush()  # 先写入 questions，再插 answers，避免外键约束报错
 
         aid = str(uuid.uuid4())
         print("  [%d] 落库: question_id=%s answer_id=%s" % (i + 1, qid, aid))
-        answer = Answer(
-            id=aid,
+        await add_answer(
+            db_session,
+            answer_id=aid,
             question_id=qid,
             correct_answer=correct,
             analysis=analysis,
         )
-        db_session.add(answer)
 
-    result = await db_session.execute(select(Exercise).where(Exercise.id == exercise_id))
-    exercise = result.scalars().first()
-    if exercise:
-        exercise.status = "done"
-        logger.info("[parse_and_save_questions] exercise_id=%s 状态已设为 done", exercise_id)
-    await db_session.commit()
+    await set_exercise_status(db_session, exercise_id, "done")
+    logger.info("[parse_and_save_questions] exercise_id=%s 状态已设为 done", exercise_id)
     print("-" * 50 + " [解析题目过程结束] exercise_id=%s " % exercise_id + "-" * 50 + "\n")

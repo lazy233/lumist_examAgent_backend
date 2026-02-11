@@ -7,13 +7,20 @@ from urllib.parse import quote
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.models.doc import Doc
-from app.models.exercise import Exercise
+from app.repositories.doc_repository import (
+    commit_and_refresh_doc,
+    create_doc,
+    delete_doc_by_id,
+    get_doc_by_id,
+    list_docs as repo_list_docs,
+    unlink_exercises_from_doc,
+)
 from app.repositories.user_repository import DEV_USER_ID, get_or_create_dev_user
+from app.schemas.docs import DocItem, DocListResponse, DocParsedInfo, DocUploadResponse
 from app.services.storage_service import delete_doc_files_async, save_to_library_async, save_upload_async
 
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".pptx", ".txt"}
@@ -21,7 +28,7 @@ ALLOWED_EXTENSIONS = {".pdf", ".docx", ".pptx", ".txt"}
 router = APIRouter()
 
 
-@router.post("/docs/materials/upload")
+@router.post("/docs/materials/upload", response_model=DocUploadResponse)
 async def upload_material(
     file: UploadFile = File(...),
     saveToLibrary: str = Form("false"),
@@ -50,8 +57,9 @@ async def upload_material(
     if save_to_lib:
         await save_to_library_async(file_path, doc_id, filename)
 
-    doc = Doc(
-        id=doc_id,
+    await create_doc(
+        db,
+        doc_id=doc_id,
         owner_id=user.id,
         file_name=filename,
         file_path=file_path,
@@ -60,13 +68,10 @@ async def upload_material(
         status="uploaded",
         save_to_library=save_to_lib,
     )
-    db.add(doc)
-    await db.commit()
-
-    return {"docId": doc_id, "fileName": filename, "status": "uploaded"}
+    return DocUploadResponse(docId=doc_id, fileName=filename, status="uploaded")
 
 
-@router.post("/docs/upload")
+@router.post("/docs/upload", response_model=DocUploadResponse)
 async def upload_doc(
     file: UploadFile = File(...),
     saveToLibrary: str = Form("false"),
@@ -91,8 +96,9 @@ async def upload_doc(
     if save_to_lib:
         await save_to_library_async(file_path, doc_id, filename)
 
-    doc = Doc(
-        id=doc_id,
+    await create_doc(
+        db,
+        doc_id=doc_id,
         owner_id=user.id,
         file_name=filename,
         file_path=file_path,
@@ -101,28 +107,26 @@ async def upload_doc(
         status="uploaded",
         save_to_library=save_to_lib,
     )
-    db.add(doc)
-    await db.commit()
-
-    return {"docId": doc_id, "fileName": filename, "status": "uploaded"}
+    return DocUploadResponse(docId=doc_id, fileName=filename, status="uploaded")
 
 
-def _doc_to_item(doc: Doc) -> dict:
-    item = {
-        "docId": doc.id,
-        "fileName": doc.file_name,
-        "status": doc.status,
-        "createdAt": doc.created_at.isoformat() if doc.created_at else None,
-    }
+def _doc_to_item(doc: Doc) -> DocItem:
+    parsed = None
     if doc.status == "done":
-        item["parsed"] = {
-            "school": doc.parsed_school or "",
-            "major": doc.parsed_major or "",
-            "course": doc.parsed_course or "",
-            "knowledgePoints": doc.parsed_knowledge_points or [],
-            "summary": doc.parsed_summary or "",
-        }
-    return item
+        parsed = DocParsedInfo(
+            school=doc.parsed_school or "",
+            major=doc.parsed_major or "",
+            course=doc.parsed_course or "",
+            knowledgePoints=doc.parsed_knowledge_points or [],
+            summary=doc.parsed_summary or "",
+        )
+    return DocItem(
+        docId=doc.id,
+        fileName=doc.file_name,
+        status=doc.status,
+        createdAt=doc.created_at.isoformat() if doc.created_at else None,
+        parsed=parsed,
+    )
 
 
 def _sse_event(data: dict, event: str | None = None) -> str:
@@ -135,8 +139,7 @@ def _sse_event(data: dict, event: str | None = None) -> str:
 @router.get("/docs/{doc_id}/file")
 async def get_doc_file(doc_id: str, db: AsyncSession = Depends(get_db)):
     """获取文件内容以便前端预览。返回文件流，带正确的 Content-Type。"""
-    result = await db.execute(select(Doc).where(Doc.id == doc_id))
-    doc = result.scalars().first()
+    doc = await get_doc_by_id(db, doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail="doc not found")
     path = Path(doc.file_path)
@@ -157,16 +160,15 @@ async def get_doc_file(doc_id: str, db: AsyncSession = Depends(get_db)):
     )
 
 
-@router.get("/docs/{doc_id}")
+@router.get("/docs/{doc_id}", response_model=DocItem)
 async def get_doc(doc_id: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Doc).where(Doc.id == doc_id))
-    doc = result.scalars().first()
+    doc = await get_doc_by_id(db, doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail="doc not found")
     return _doc_to_item(doc)
 
 
-@router.get("/docs")
+@router.get("/docs", response_model=DocListResponse)
 async def list_docs(
     keyword: str | None = Query(None),
     page: int = Query(1, ge=1),
@@ -174,26 +176,17 @@ async def list_docs(
     db: AsyncSession = Depends(get_db),
 ):
     await get_or_create_dev_user(db)
-    q = select(Doc).where(Doc.owner_id == DEV_USER_ID)
-    if keyword:
-        q = q.where(Doc.file_name.ilike(f"%{keyword}%"))
-    count_stmt = select(func.count()).select_from(Doc).where(Doc.owner_id == DEV_USER_ID)
-    if keyword:
-        count_stmt = count_stmt.where(Doc.file_name.ilike(f"%{keyword}%"))
-    total = (await db.execute(count_stmt)).scalar_one()
-    result = await db.execute(
-        q.order_by(Doc.created_at.desc()).offset((page - 1) * page_size).limit(page_size)
+    items, total = await repo_list_docs(
+        db, DEV_USER_ID, keyword=keyword, page=page, page_size=page_size
     )
-    items = result.scalars().all()
-    return {"items": [_doc_to_item(d) for d in items], "total": total}
+    return DocListResponse(items=[_doc_to_item(d) for d in items], total=total)
 
 
 @router.post("/docs/{doc_id}/parse")
 async def parse_doc(doc_id: str, db: AsyncSession = Depends(get_db)):
     from app.services.doc_parse_service import parse_and_index_stream
 
-    result = await db.execute(select(Doc).where(Doc.id == doc_id))
-    doc = result.scalars().first()
+    doc = await get_doc_by_id(db, doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail="doc not found")
 
@@ -205,7 +198,7 @@ async def parse_doc(doc_id: str, db: AsyncSession = Depends(get_db)):
     async def gen():
         # 1) 标记解析中
         doc.status = "parsing"
-        await db.commit()
+        await commit_and_refresh_doc(db, doc)
         yield _sse_event({"docId": doc_id_val, "status": "parsing"}, event="status")
 
         try:
@@ -221,8 +214,7 @@ async def parse_doc(doc_id: str, db: AsyncSession = Depends(get_db)):
                 if chunk:
                     yield _sse_event({"content": chunk}, event="chunk")
             doc.status = "done"
-            await db.commit()
-            await db.refresh(doc)
+            await commit_and_refresh_doc(db, doc)
 
             # 3) 返回解析结果
             parsed = {
@@ -238,7 +230,7 @@ async def parse_doc(doc_id: str, db: AsyncSession = Depends(get_db)):
             )
         except Exception as e:
             doc.status = "failed"
-            await db.commit()
+            await commit_and_refresh_doc(db, doc)
             yield _sse_event(
                 {"docId": doc_id_val, "status": "failed", "detail": str(e)},
                 event="error",
@@ -256,18 +248,10 @@ async def delete_doc(doc_id: str, db: AsyncSession = Depends(get_db)):
     """
     删除资料。按外键依赖先解除练习对该资料的引用，再删磁盘文件，最后删 doc 记录，避免外键约束错误。
     """
-    result = await db.execute(select(Doc).where(Doc.id == doc_id))
-    doc = result.scalars().first()
+    doc = await get_doc_by_id(db, doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail="doc not found")
 
-    # 1) 解除 exercises 对当前 doc 的引用，避免删 doc 时触发外键约束
-    await db.execute(
-        update(Exercise).where(Exercise.source_doc_id == doc_id).values(source_doc_id=None)
-    )
-    await db.flush()
-    # 2) 删除磁盘上的文件（需在删 doc 前执行，依赖 doc 的 file_path 等）
+    await unlink_exercises_from_doc(db, doc_id)
     await delete_doc_files_async(doc)
-    # 3) 删除 doc 记录
-    await db.execute(Doc.__table__.delete().where(Doc.id == doc_id))
-    await db.commit()
+    await delete_doc_by_id(db, doc_id)

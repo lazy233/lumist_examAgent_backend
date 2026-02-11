@@ -10,20 +10,40 @@ import tempfile
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, Response
-
-logger = logging.getLogger(__name__)
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
-from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.db import SessionLocal, get_db
-from app.models.answer import Answer
-from app.models.exercise import Exercise
-from app.models.exercise_result import ExerciseResult
-from app.models.question import Question
-from app.repositories.user_repository import DEV_USER_ID, get_or_create_dev_user
 from app.core.config import settings
+from app.core.db import SessionLocal, get_db
+from app.repositories.exercise_repository import (
+    create_exercise,
+    create_exercise_result,
+    delete_exercise_cascade,
+    get_answers_by_question_ids,
+    get_exercise_by_id,
+    get_latest_exercise_result,
+    get_latest_scores_by_exercise_ids,
+    get_question_counts_by_exercise_ids,
+    get_question_types_by_exercise_ids,
+    get_questions_by_exercise_id,
+    list_exercises as repo_list_exercises,
+    set_exercise_status,
+)
+from app.repositories.user_repository import DEV_USER_ID, get_or_create_dev_user
+from app.schemas.exercises import (
+    AnalyzeFileResponse,
+    AnalyzeRequest,
+    AnalyzeResponse,
+    ExerciseDetailResponse,
+    ExerciseListItem,
+    ExerciseListResponse,
+    GenerateFromTextRequest,
+    QuestionItem,
+    ResultItem,
+    SubmitRequest,
+    SubmitResponse,
+    UsageInfo,
+)
 from app.services.bailian_retrieve_service import retrieve_for_question_generation
 from app.services.exercise_service import (
     DIFFICULTY_LABELS,
@@ -35,6 +55,7 @@ from app.services.exercise_service import (
 )
 from app.services.file_analyze_service import analyze_file_for_questions
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # 前端 status：DB 存 generating / done / failed，接口返回 ready 表示可作答
@@ -82,47 +103,6 @@ def _options_list_to_object(options: list | None) -> dict[str, str]:
         elif len(s) >= 2 and s[0].upper() in "ABCD":
             out[s[0].upper()] = s[1:].lstrip(".、． ").strip() or s
     return out
-
-
-class AnalyzeRequest(BaseModel):
-    content: str = Field(default="", description="用户输入的文字材料")
-    question_type: str = Field(default="single_choice", alias="questionType")
-    difficulty: str = Field(default="medium")
-    count: int = Field(default=5, ge=1, description="题目数量，无上限")
-
-
-class UsageInfo(BaseModel):
-    inputTokens: int = 0
-    outputTokens: int = 0
-    totalTokens: int = 0
-
-
-class AnalyzeResponse(BaseModel):
-    keyPoints: list[str] = Field(default_factory=list)
-    title: str = Field("", description="整张试卷大标题，由分析得出，生成时传入")
-    questionType: str = Field(..., description="题型枚举值")
-    questionTypeLabel: str = Field(..., description="题型中文")
-    difficulty: str = Field(..., description="难度枚举值")
-    difficultyLabel: str = Field(..., description="难度中文")
-    count: int = Field(..., description="题目数量")
-    usage: UsageInfo | None = Field(None, description="本次分析调用大模型消耗的 token")
-
-
-class GenerateFromTextRequest(BaseModel):
-    content: str = Field(default="", description="用户输入的文字材料")
-    title: str | None = Field(None, description="整张试卷大标题，来自分析接口，可选")
-    question_type: str = Field(default="single_choice", alias="questionType")
-    difficulty: str = Field(default="medium")
-    count: int = Field(default=5, ge=1, description="题目数量，无上限")
-    key_points: list[str] | None = Field(default=None, alias="keyPoints", description="分析得到的要点")
-    analysis: str | None = Field(default=None, description="分析结果或用户意图补充")
-
-
-class AnalyzeFileResponse(BaseModel):
-    """文件分析结果，用户确认后可将 content、title 传给 generate-from-text。"""
-    content: str = Field(..., description="分析得到的出题材料正文，即 generate-from-text 的 content")
-    title: str = Field("", description="建议试卷标题，即 generate-from-text 的 title")
-    usage: UsageInfo | None = Field(None, description="本次文件分析调用大模型消耗的 token")
 
 
 @router.post("/exercises/analyze", response_model=AnalyzeResponse)
@@ -291,15 +271,9 @@ async def _stream_generate(
         except Exception as e:
             logger.exception("[generate-from-text] 解析或落库失败 exercise_id=%s: %s", exercise_id, e)
             try:
-                await db.rollback()  # 先回滚，否则 session 处于 PendingRollback 无法再查询
-                result = await db.execute(select(Exercise).where(Exercise.id == exercise_id))
-                ex = result.scalars().first()
-                if ex:
-                    ex.status = "failed"
-                    await db.commit()
-                    logger.info("[generate-from-text] 已将练习状态设为 failed exercise_id=%s", exercise_id)
-                else:
-                    logger.warning("[generate-from-text] 未找到练习无法设为 failed exercise_id=%s", exercise_id)
+                await db.rollback()
+                await set_exercise_status(db, exercise_id, "failed")
+                logger.info("[generate-from-text] 已将练习状态设为 failed exercise_id=%s", exercise_id)
             except Exception as e2:
                 logger.exception("[generate-from-text] 更新状态为 failed 时出错: %s", e2)
                 await db.rollback()
@@ -332,8 +306,9 @@ async def generate_from_text(
     user = await get_or_create_dev_user(db)
     exercise_id = str(uuid.uuid4())
     title = _exercise_title_from_request(body.title, body.content)
-    exercise = Exercise(
-        id=exercise_id,
+    await create_exercise(
+        db,
+        exercise_id=exercise_id,
         owner_id=user.id,
         title=title,
         status="generating",
@@ -342,8 +317,6 @@ async def generate_from_text(
         question_type=body.question_type,
         source_doc_id=None,
     )
-    db.add(exercise)
-    await db.commit()
 
     # 组合用户意图（标题/题型/难度/数量/要点/分析）
     intent_parts = [
@@ -396,26 +369,6 @@ async def generate_from_text(
 # ---------- 练习详情、提交答案、练习列表 ----------
 
 
-class QuestionItem(BaseModel):
-    questionId: str
-    type: str
-    stem: str
-    options: dict[str, str] | None = None
-
-
-class ExerciseDetailResponse(BaseModel):
-    exerciseId: str
-    title: str | None
-    status: str
-    difficulty: str
-    count: int
-    questionType: str
-    questionTypeLabel: str
-    questions: list[QuestionItem]
-    createdAt: str
-    score: int | None = None
-
-
 @router.get("/exercises/{exercise_id}", response_model=ExerciseDetailResponse)
 async def get_exercise_detail(
     exercise_id: str,
@@ -425,16 +378,10 @@ async def get_exercise_detail(
     获取练习详情。status 为 generating 时前端可轮询；ready 表示可作答。
     """
     await get_or_create_dev_user(db)
-    result = await db.execute(select(Exercise).where(Exercise.id == exercise_id))
-    exercise = result.scalars().first()
+    exercise = await get_exercise_by_id(db, exercise_id)
     if not exercise:
         raise HTTPException(status_code=404, detail="exercise not found")
-    questions_result = await db.execute(
-        select(Question)
-        .where(Question.exercise_id == exercise_id)
-        .order_by(Question.created_at.asc())
-    )
-    questions = questions_result.scalars().all()
+    questions = await get_questions_by_exercise_id(db, exercise_id)
     status_api = STATUS_TO_API.get(exercise.status, exercise.status)
     question_items = []
     for q in questions:
@@ -453,16 +400,7 @@ async def get_exercise_detail(
     created_at = exercise.created_at.isoformat() if exercise.created_at else ""
     question_type = exercise.question_type or (questions[0].type if questions else "single_choice")
     question_type_label = QUESTION_TYPE_LABELS.get(question_type, question_type)
-    # 若已提交过，返回最后一次得分
-    last_result_res = await db.execute(
-        select(ExerciseResult)
-        .where(
-            ExerciseResult.exercise_id == exercise_id,
-            ExerciseResult.owner_id == DEV_USER_ID,
-        )
-        .order_by(ExerciseResult.submitted_at.desc())
-    )
-    last_result = last_result_res.scalars().first()
+    last_result = await get_latest_exercise_result(db, exercise_id, DEV_USER_ID)
     score = last_result.score if last_result else None
     return ExerciseDetailResponse(
         exerciseId=exercise.id,
@@ -478,29 +416,6 @@ async def get_exercise_detail(
     )
 
 
-class SubmitAnswerItem(BaseModel):
-    questionId: str
-    answer: str
-
-
-class SubmitRequest(BaseModel):
-    answers: list[SubmitAnswerItem]
-
-
-class ResultItem(BaseModel):
-    questionId: str
-    isCorrect: bool
-    userAnswer: str
-    correctAnswer: str
-    analysis: str | None = None
-
-
-class SubmitResponse(BaseModel):
-    score: int
-    correctRate: float
-    results: list[ResultItem]
-
-
 @router.post("/exercises/{exercise_id}/submit", response_model=SubmitResponse)
 async def submit_exercise(
     exercise_id: str,
@@ -511,23 +426,14 @@ async def submit_exercise(
     提交答案，返回得分、正确率及每题对错与解析。
     """
     user = await get_or_create_dev_user(db)
-    exercise_result = await db.execute(select(Exercise).where(Exercise.id == exercise_id))
-    exercise = exercise_result.scalars().first()
+    exercise = await get_exercise_by_id(db, exercise_id)
     if not exercise:
         raise HTTPException(status_code=404, detail="exercise not found")
-    questions_result = await db.execute(select(Question).where(Question.exercise_id == exercise_id))
-    questions = questions_result.scalars().all()
+    questions = await get_questions_by_exercise_id(db, exercise_id)
     q_by_id = {q.id: q for q in questions}
-    answers_by_qid = {
-        a.question_id: a
-        for a in (
-            await db.execute(
-                select(Answer).where(Answer.question_id.in_(q_by_id.keys()))
-            )
-        )
-        .scalars()
-        .all()
-    }
+    question_ids = list(q_by_id.keys())
+    answers = await get_answers_by_question_ids(db, question_ids)
+    answers_by_qid = {a.question_id: a for a in answers}
     user_answers = {a.questionId: a.answer for a in body.answers}
     results: list[ResultItem] = []
     correct_count = 0
@@ -561,34 +467,20 @@ async def submit_exercise(
         }
         for r in results
     ]
-    er = ExerciseResult(
-        id=result_id,
+    await create_exercise_result(
+        db,
+        result_id=result_id,
         exercise_id=exercise_id,
         owner_id=user.id,
         score=score,
         correct_rate=int(round(100 * correct_rate)),
         result_details=result_details,
     )
-    db.add(er)
-    await db.commit()
     return SubmitResponse(
         score=score,
         correctRate=round(correct_rate, 2),
         results=results,
     )
-
-
-class ExerciseListItem(BaseModel):
-    exerciseId: str
-    title: str | None
-    status: str
-    difficulty: str
-    count: int
-    questionType: str
-    questionTypeLabel: str
-    questionCount: int = Field(0, description="实际落库的题目数，用于核对是否插入成功")
-    createdAt: str
-    score: int | None = None
 
 
 @router.delete("/exercises/{exercise_id}", status_code=204)
@@ -600,29 +492,13 @@ async def delete_exercise(
     删除练习。按外键依赖顺序删除：作答记录 -> 答案 -> 题目 -> 练习，确保无外键约束错误。
     """
     await get_or_create_dev_user(db)
-    exercise_result = await db.execute(select(Exercise).where(Exercise.id == exercise_id))
-    exercise = exercise_result.scalars().first()
+    exercise = await get_exercise_by_id(db, exercise_id)
     if not exercise:
         raise HTTPException(status_code=404, detail="exercise not found")
-
-    question_result = await db.execute(select(Question.id).where(Question.exercise_id == exercise_id))
-    question_ids = [row[0] for row in question_result.all()]
-
-    # 按依赖顺序删除，每步 flush 确保子表先落盘再删父表，避免外键约束
-    await db.execute(
-        ExerciseResult.__table__.delete().where(ExerciseResult.exercise_id == exercise_id)
-    )
-    await db.flush()
-    if question_ids:
-        await db.execute(Answer.__table__.delete().where(Answer.question_id.in_(question_ids)))
-        await db.flush()
-    await db.execute(Question.__table__.delete().where(Question.exercise_id == exercise_id))
-    await db.flush()
-    await db.execute(Exercise.__table__.delete().where(Exercise.id == exercise_id))
-    await db.commit()
+    await delete_exercise_cascade(db, exercise_id)
 
 
-@router.get("/exercises", response_model=dict)
+@router.get("/exercises", response_model=ExerciseListResponse)
 async def list_exercises(
     page: int = Query(1, ge=1),
     pageSize: int = Query(10, ge=1, le=100),
@@ -635,51 +511,28 @@ async def list_exercises(
     练习列表（历史练习）。支持 keyword（标题）、difficulty、questionType（题型）筛选。返回 items 与 total。
     """
     user = await get_or_create_dev_user(db)
-    q = select(Exercise).where(Exercise.owner_id == DEV_USER_ID)
-    if keyword is not None and keyword.strip():
-        q = q.where(Exercise.title.ilike(f"%{keyword.strip()}%"))
-    if difficulty is not None and difficulty.strip():
-        q = q.where(Exercise.difficulty == difficulty.strip())
-    if questionType is not None and questionType.strip():
-        q = q.where(Exercise.question_type == questionType.strip())
-    count_stmt = select(func.count()).select_from(Exercise).where(Exercise.owner_id == DEV_USER_ID)
-    if keyword is not None and keyword.strip():
-        count_stmt = count_stmt.where(Exercise.title.ilike(f"%{keyword.strip()}%"))
-    if difficulty is not None and difficulty.strip():
-        count_stmt = count_stmt.where(Exercise.difficulty == difficulty.strip())
-    if questionType is not None and questionType.strip():
-        count_stmt = count_stmt.where(Exercise.question_type == questionType.strip())
-    total = (await db.execute(count_stmt)).scalar_one()
-    result = await db.execute(
-        q.order_by(Exercise.created_at.desc())
-        .offset((page - 1) * pageSize)
-        .limit(pageSize)
+    items, total = await repo_list_exercises(
+        db,
+        DEV_USER_ID,
+        keyword=keyword,
+        difficulty=difficulty,
+        question_type=questionType,
+        page=page,
+        page_size=pageSize,
     )
-    items = result.scalars().all()
+    if not items:
+        return ExerciseListResponse(items=[], total=total)
+    exercise_ids = [ex.id for ex in items]
+    question_counts = await get_question_counts_by_exercise_ids(db, exercise_ids)
+    question_types = await get_question_types_by_exercise_ids(db, exercise_ids)
+    scores = await get_latest_scores_by_exercise_ids(db, exercise_ids, user.id)
     out_items = []
     for ex in items:
         status_api = STATUS_TO_API.get(ex.status, ex.status)
-        q_type = ex.question_type
-        if not q_type:
-            first_q = await db.execute(
-                select(Question.type).where(Question.exercise_id == ex.id).order_by(Question.created_at.asc()).limit(1)
-            )
-            q_type = first_q.scalar_one_or_none() or "single_choice"
+        q_type = ex.question_type or question_types.get(ex.id) or "single_choice"
         q_type_label = QUESTION_TYPE_LABELS.get(q_type, q_type)
-        qcount_res = await db.execute(
-            select(func.count()).select_from(Question).where(Question.exercise_id == ex.id)
-        )
-        question_count = qcount_res.scalar_one()
-        last_result_res = await db.execute(
-            select(ExerciseResult)
-            .where(
-                ExerciseResult.exercise_id == ex.id,
-                ExerciseResult.owner_id == user.id,
-            )
-            .order_by(ExerciseResult.submitted_at.desc())
-        )
-        last_result = last_result_res.scalars().first()
-        score = last_result.score if last_result else None
+        question_count = question_counts.get(ex.id, 0)
+        score = scores.get(ex.id)
         out_items.append(
             ExerciseListItem(
                 exerciseId=ex.id,
@@ -694,4 +547,4 @@ async def list_exercises(
                 score=score,
             )
         )
-    return {"items": out_items, "total": total}
+    return ExerciseListResponse(items=out_items, total=total)

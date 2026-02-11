@@ -1,4 +1,4 @@
-"""大模型服务，用于文档总结等。API Key 硬编码，上线前需改为环境变量。"""
+"""大模型服务，用于文档总结、出题等。API Key 从环境变量读取。"""
 import json
 import os
 from typing import Any, AsyncIterator
@@ -8,18 +8,22 @@ from openai import AsyncOpenAI
 from app.core.config import settings
 
 # 绕过代理，避免 SSL 连接错误
-os.environ.update({"HTTP_PROXY": "", "HTTPS_PROXY": "", "NO_PROXY": "*"})
+os.environ.setdefault("HTTP_PROXY", "")
+os.environ.setdefault("HTTPS_PROXY", "")
+os.environ.setdefault("NO_PROXY", "*")
 
-_DEFAULT_API_KEY = "sk-ed09584eec034991a5a7029342c05d98"
 _client: AsyncOpenAI | None = None
 
 
 def get_openai_client() -> AsyncOpenAI:
-    """供出题等模块使用的 OpenAI 兼容客户端（阿里云百炼）。"""
+    """供出题等模块使用的 OpenAI 兼容客户端（阿里云百炼）。需设置 DASHSCOPE_API_KEY 或 OPENAI_API_KEY。"""
     global _client
     if _client is None:
+        api_key = os.getenv("DASHSCOPE_API_KEY") or os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("请设置环境变量 DASHSCOPE_API_KEY 或 OPENAI_API_KEY")
         _client = AsyncOpenAI(
-            api_key=os.getenv("OPENAI_API_KEY", _DEFAULT_API_KEY),
+            api_key=api_key,
             base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
         )
     return _client

@@ -79,10 +79,7 @@ async def parse_and_index_stream(
     db: "AsyncSession | None" = None,
     doc: "Doc | None" = None,
 ):
-    """
-    流式解析文档，yield 内容片段（可用于 SSE 打字机效果）。
-    结束后会将解析结果写入 doc。
-    """
+
     raw_text = await _load_text_async(file_path)
     cleaned = _clean_text(raw_text)
 

@@ -1,46 +1,20 @@
-"""登录与注册接口：POST /auth/login、POST /auth/register。"""
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.core.security import hash_password, verify_password, create_access_token
-from app.repositories.user_repository import get_user_by_username, create_user
 from app.models.user import User
+from app.repositories.user_repository import create_user, get_user_by_username
+from app.schemas.auth import AuthResponse, AuthUser, LoginRequest, RegisterRequest
 
 router = APIRouter()
-
 
 MAX_BCRYPT_PASSWORD_BYTES = 72
 
 
 def _ensure_password_length(password: str) -> None:
-    """bcrypt 限制 72 bytes，超过会抛异常。"""
     if len(password.encode("utf-8")) > MAX_BCRYPT_PASSWORD_BYTES:
         raise HTTPException(status_code=400, detail="密码过长（最多 72 字节）")
-
-
-# ----- 请求体 -----
-class LoginRequest(BaseModel):
-    username: str = Field(..., description="用户名")
-    password: str = Field(..., description="密码")
-
-
-class RegisterRequest(BaseModel):
-    username: str = Field(..., description="用户名（建议唯一）")
-    password: str = Field(..., min_length=6, description="密码（至少 6 位）")
-    name: str | None = Field(None, description="姓名/昵称")
-
-
-# ----- 响应体（与前端约定：token + user.id / user.name）-----
-class AuthUser(BaseModel):
-    id: str = Field(..., description="用户 ID")
-    name: str = Field(..., description="显示名称")
-
-
-class AuthResponse(BaseModel):
-    token: str = Field(..., description="JWT 或会话令牌")
-    user: AuthUser = Field(..., description="用户信息")
 
 
 def _auth_response(user: User) -> AuthResponse:

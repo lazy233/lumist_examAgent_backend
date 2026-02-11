@@ -1,5 +1,6 @@
 """执行 002_add_exercise_question_type.sql：为 exercises 表增加 question_type 字段并回填。
-与应用使用同一 DATABASE_URL（会从项目根目录 .env 加载环境变量）。"""
+使用 asyncpg（与应用一致），不依赖 psycopg2。"""
+import asyncio
 import os
 import sys
 
@@ -20,17 +21,18 @@ if os.path.isfile(_env_file):
 
 from pathlib import Path
 
-from sqlalchemy import text, create_engine
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.core.config import settings
 
 
-def _sync_database_url(url: str) -> str:
-    """转为同步驱动 URL（psycopg2），便于迁移脚本使用。"""
-    if url.startswith("postgresql+asyncpg://"):
-        return url.replace("postgresql+asyncpg://", "postgresql+psycopg2://", 1)
+def _async_database_url(url: str) -> str:
+    """确保为 asyncpg URL。"""
+    if url.startswith("postgresql+psycopg2://"):
+        return url.replace("postgresql+psycopg2://", "postgresql+asyncpg://", 1)
     if url.startswith("postgresql://"):
-        return url.replace("postgresql://", "postgresql+psycopg2://", 1)
+        return url.replace("postgresql://", "postgresql+asyncpg://", 1)
     return url
 
 
@@ -45,19 +47,17 @@ def _redact_url(url: str) -> str:
     return url
 
 
-def main():
+async def main():
     migration_dir = Path(_project_root) / "sql" / "migrations"
     sql_file = migration_dir / "002_add_exercise_question_type.sql"
     if not sql_file.is_file():
         print(f"Migration file not found: {sql_file}")
         sys.exit(1)
 
-    sync_url = _sync_database_url(settings.database_url)
-    engine = create_engine(sync_url)
-    print(f"Using DB: {_redact_url(sync_url)}")
+    url = _async_database_url(settings.database_url)
+    engine = create_async_engine(url)
+    print(f"Using DB: {_redact_url(url)}")
 
-    full_sql = sql_file.read_text(encoding="utf-8").strip()
-    # 1) DO 块（含 ADD COLUMN）
     do_block = """DO $$
 BEGIN
     IF NOT EXISTS (
@@ -67,30 +67,27 @@ BEGIN
         ALTER TABLE exercises ADD COLUMN question_type VARCHAR(30);
     END IF;
 END $$;"""
-    # 2) 回填
     update_sql = """UPDATE exercises e
 SET question_type = (
     SELECT q.type FROM questions q WHERE q.exercise_id = e.id ORDER BY q.created_at ASC LIMIT 1
 )
 WHERE e.question_type IS NULL;"""
-    # 3) 索引
     index_sql = "CREATE INDEX IF NOT EXISTS idx_exercises_question_type ON exercises(question_type);"
 
-    with engine.connect() as conn:
+    async with engine.begin() as conn:
         for name, stmt in [("DO (add column)", do_block), ("UPDATE (backfill)", update_sql), ("CREATE INDEX", index_sql)]:
             try:
-                conn.execute(text(stmt))
-                conn.commit()
+                await conn.execute(text(stmt))
                 print(f"OK: {name}")
             except Exception as e:
                 if "already exists" in str(e).lower() or "duplicate" in str(e).lower():
                     print(f"Skip: {name} (already exists)")
-                    conn.rollback()
                 else:
                     raise
 
+    await engine.dispose()
     print("Migration 002_add_exercise_question_type completed.")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

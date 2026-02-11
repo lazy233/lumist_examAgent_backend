@@ -181,7 +181,9 @@ sequenceDiagram
     API->>DB: INSERT exercises
     API->>Svc: RAG(可选)+拼 prompt
     Svc->>LLM: 流式生成
-    LLM-->>Svc-->>API-->>C: SSE chunks
+    LLM-->>Svc: chunks
+    Svc-->>API: chunks
+    API-->>C: SSE chunks
     Svc->>Svc: 解析题目→补全答案(若有空)
     Svc->>DB: questions+answers, status=done
     API-->>C: exerciseId

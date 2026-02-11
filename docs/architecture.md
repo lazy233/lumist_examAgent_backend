@@ -23,54 +23,23 @@
 系统分层：**API 路由** → **服务层** → **数据与外部依赖**。除登录/注册外，需在请求头携带 `Authorization: Bearer <token>` 做鉴权（部分接口当前使用开发用户占位）。
 
 ```mermaid
-flowchart TB
-    subgraph Client["客户端"]
-        Web["Web / 小程序"]
+flowchart LR
+    subgraph 客户端
+        Web[Web/小程序]
     end
-
-    subgraph API["API 层 (FastAPI)"]
-        Auth["/auth 登录·注册"]
-        Health["/health 健康检查"]
-        Docs["/docs 资料上传·解析·列表·删除"]
-        Exercises["/exercises 分析·出题·详情·提交·列表"]
-        User["/user 个人中心"]
+    subgraph API[API 层]
+        R1[auth/docs/exercises/user]
     end
-
-    subgraph Services["服务层"]
-        Storage["storage_service\n文件落盘·删文件"]
-        DocParse["doc_parse_service\n文档解析·流式总结"]
-        LLM["llm_service\n文档总结·流式总结"]
-        FileAnalyze["file_analyze_service\n上传文件分析出题材料"]
-        Bailian["bailian_retrieve_service\nRAG 知识库检索"]
-        ExerciseSvc["exercise_service\n分析材料·建 prompt·流式生成·解析落库·补全答案"]
+    subgraph 服务层
+        S1[storage·doc_parse·llm]
+        S2[file_analyze·bailian·exercise_service]
     end
-
-    subgraph Data["数据与外部"]
-        PG[(PostgreSQL\nusers, docs, exercises\nquestions, answers\nexercise_results)]
-        Disk["本地文件系统\nupload / library"]
-        DashScope["大模型 API\n(阿里云百炼/DashScope)"]
-        BailianAPI["百炼知识库 API\n(RAG 检索)"]
+    subgraph 数据与外部
+        D1[(PostgreSQL)]
+        D2[磁盘·大模型·百炼RAG]
     end
-
-    Web --> Auth
-    Web --> Docs
-    Web --> Exercises
-    Web --> User
-
-    Auth --> PG
-    Docs --> Storage
-    Docs --> DocParse
-    DocParse --> LLM
-    Docs --> PG
-    Exercises --> ExerciseSvc
-    Exercises --> FileAnalyze
-    Exercises --> Bailian
-    ExerciseSvc --> LLM
-    ExerciseSvc --> PG
-    FileAnalyze --> DashScope
-    Bailian --> BailianAPI
-    LLM --> DashScope
-    Storage --> Disk
+    Web --> R1 --> S1 --> D1
+    R1 --> S2 --> D2
 ```
 
 **技术栈（简要）**：FastAPI、PostgreSQL（SQLAlchemy asyncpg）、本地文件存储、阿里云百炼（大模型 + 知识库 RAG）。文档解析使用 LangChain 加载器（PDF/DOCX/PPTX/TXT）。
@@ -83,63 +52,19 @@ flowchart TB
 
 ```mermaid
 erDiagram
-    users ||--o{ docs : "拥有"
-    users ||--o{ exercises : "拥有"
-    users ||--o{ exercise_results : "提交"
-
-    exercises ||--o{ questions : "包含"
-    exercises }o--o| docs : "来源(可选)"
-
-    questions ||--|| answers : "标准答案与解析"
-    exercises ||--o{ exercise_results : "多次作答"
-
-    users {
-        string id PK
-        string username
-        string password_hash
-        string name
-    }
-
-    docs {
-        string id PK
-        string owner_id FK
-        string file_path
-        string status "uploaded|parsing|done|failed"
-        json parsed_* "学校/专业/课程/知识点/摘要"
-    }
-
-    exercises {
-        string id PK
-        string owner_id FK
-        string status "generating|done|failed"
-        string difficulty
-        int count
-        string question_type
-        string source_doc_id FK
-    }
-
-    questions {
-        string id PK
-        string exercise_id FK
-        string type "题型"
-        text stem
-        json options
-    }
-
-    answers {
-        string id PK
-        string question_id FK
-        string correct_answer
-        text analysis
-    }
-
-    exercise_results {
-        string id PK
-        string exercise_id FK
-        string owner_id FK
-        int score
-        json result_details
-    }
+    users ||--o{ docs : 拥有
+    users ||--o{ exercises : 拥有
+    users ||--o{ exercise_results : 提交
+    exercises ||--o{ questions : 包含
+    exercises }o--o| docs : 来源可选
+    questions ||--|| answers : 答案解析
+    exercises ||--o{ exercise_results : 多次作答
+    users { string id PK string username }
+    docs { string id PK string owner_id string status }
+    exercises { string id PK string owner_id string status }
+    questions { string id PK string exercise_id string stem }
+    answers { string id PK string question_id string correct_answer }
+    exercise_results { string id PK string exercise_id int score }
 ```
 
 - **docs**：上传后 `status=uploaded`；发起解析后 `parsing` → 成功 `done` 写入 `parsed_*`，失败 `failed`。
@@ -162,28 +87,15 @@ erDiagram
 ```mermaid
 sequenceDiagram
     participant C as 客户端
-    participant API as auth 路由
-    participant Repo as user_repository
-    participant Sec as security
-    participant DB as PostgreSQL
-
-    Note over C,DB: 登录
-    C->>API: POST /auth/login {username, password}
-    API->>Repo: get_user_by_username(username)
-    Repo->>DB: SELECT users
-    DB-->>Repo: user or null
-    Repo-->>API: user
-    alt 用户不存在
-        API-->>C: 401 用户名或密码错误
-    else 用户存在
-        API->>Sec: verify_password(password, hash)
-        alt 密码错误
-            API-->>C: 401 用户名或密码错误
-        else 密码正确
-            API->>Sec: create_access_token(user.id)
-            Sec-->>API: JWT
-            API-->>C: 200 { token, user: { id, name } }
-        end
+    participant API as auth
+    participant DB as 数据库
+    C->>API: login(username, password)
+    API->>DB: 查用户
+    alt 无用户/密码错
+        API-->>C: 401
+    else 正确
+        API->>API: 签发 JWT
+        API-->>C: token + user
     end
 ```
 
@@ -208,38 +120,20 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant C as 客户端
-    participant API as docs 路由
-    participant Storage as storage_service
-    participant DocParse as doc_parse_service
-    participant LLM as llm_service
-    participant DB as PostgreSQL
-    participant Disk as 文件系统
-
-    Note over C,Disk: 上传
-    C->>API: POST /docs/upload (file, saveToLibrary)
-    API->>Storage: save_upload_async(file, filename, doc_id)
-    Storage->>Disk: 写入 upload_dir
-    opt saveToLibrary
-        API->>Storage: save_to_library_async(...)
-        Storage->>Disk: 复制到 library_dir
-    end
-    API->>DB: INSERT docs (status=uploaded)
-    API-->>C: { docId, fileName, status }
-
-    Note over C,Disk: 解析（SSE）
-    C->>API: POST /docs/{doc_id}/parse
-    API->>DB: SELECT doc, 更新 status=parsing
-    API-->>C: SSE event: status=parsing
-    API->>DocParse: parse_and_index_stream(file_path, doc, db)
-    DocParse->>Disk: LangChain 加载 PDF/DOCX/PPTX/TXT
-    DocParse->>LLM: stream_summarize_document(cleaned_text)
-    Note over LLM: prompt = 固定说明 + 文档内容[:8000]
-    LLM-->>DocParse: stream chunks
-    DocParse-->>API: yield chunks
-    API-->>C: SSE event: chunk (打字机效果)
-    DocParse->>DocParse: parse_summary_content(full) -> JSON
-    DocParse->>DB: 更新 doc.parsed_* , status=done
-    API-->>C: SSE event: result { status, parsed }
+    participant API as docs
+    participant Svc as 解析服务
+    participant DB as 数据库
+    Note over C,DB: 上传
+    C->>API: upload(file)
+    API->>Svc: 落盘
+    API->>DB: INSERT docs
+    API-->>C: docId, status
+    Note over C,DB: 解析(SSE)
+    C->>API: parse(doc_id)
+    API->>DB: status=parsing
+    API->>Svc: 加载文件→LLM流式总结→解析JSON
+    Svc->>DB: 更新 parsed_*, status=done
+    API-->>C: SSE chunk + result
 ```
 
 **技术点**：文件落盘与删除在 `storage_service`（同步逻辑用 `asyncio.to_thread` 避免阻塞）；文档解析用 LangChain 的 PyPDFLoader、Docx2txtLoader、TextLoader 等；大模型调用走 OpenAI 兼容接口（阿里云百炼），提示词在 `llm_service` 中「固定模板 + 文档内容截断」拼接。
@@ -267,73 +161,30 @@ sequenceDiagram
 
 ```mermaid
 flowchart LR
-    subgraph 用户侧
-        A[输入/确认材料] --> B[选择题型难度数量]
-        B --> C[点击生成]
-    end
-
-    subgraph 分析
-        D[POST /exercises/analyze] --> E[analyze_material\n材料→要点]
-        E --> F[返回 keyPoints + title]
-    end
-
-    subgraph 生成
-        G[POST /exercises/generate-from-text] --> H[写 exercises 记录]
-        H --> I[RAG 检索 + 可选梳理]
-        I --> J[_build_questions_prompt\n意图+知识库+材料]
-        J --> K[流式调用大模型]
-        K --> L[SSE 下发内容]
-        L --> M[流结束: parse_and_save_questions]
-        M --> N[正则解析题目块]
-        N --> O[答案/解析为空则补全]
-        O --> P[写 questions + answers]
-        P --> Q[exercises.status=done]
-        Q --> R[返回 exerciseId]
-    end
-
-    C --> D
-    F --> C
-    C --> G
+    A[材料+题型难度数量] --> B[analyze→要点+标题]
+    B --> C[generate-from-text]
+    C --> D[写 exercises]
+    D --> E[RAG 可选]
+    E --> F[拼 prompt→流式生成]
+    F --> G[解析落库→status=done]
+    G --> H[返回 exerciseId]
 ```
 
 ```mermaid
 sequenceDiagram
     participant C as 客户端
-    participant API as exercises 路由
-    participant Ex as exercise_service
-    participant Bailian as bailian_retrieve
+    participant API as exercises
+    participant Svc as exercise_service
     participant LLM as 大模型
-    participant DB as PostgreSQL
-
-    C->>API: POST /exercises/generate-from-text (content, 题型, 难度, 数量, keyPoints, ...)
-    API->>DB: INSERT exercises (status=generating), commit
-    API->>Bailian: retrieve_for_question_generation(content[:2000])
-    Bailian-->>API: (nodes, rag_text)
-    opt RAG 梳理开启
-        API->>Ex: analyze_rag_context(rag_text)
-        Ex->>LLM: 梳理知识库片段
-        LLM-->>Ex: 整理后文本
-        Ex-->>API: rag_context
-    end
-    API->>Ex: _stream_generate(content, ..., rag_context, intent_context)
-    Ex->>Ex: _build_questions_prompt(用户意图+知识库+材料)
-    Ex->>LLM: 流式生成题目
-    loop 流式
-        LLM-->>Ex: chunk
-        Ex-->>API: chunk
-        API-->>C: SSE chunk
-    end
-    Ex->>Ex: parse_and_save_questions(full_content) [新 Session]
-    Ex->>Ex: _parse_questions_text → 题目块
-    loop 每题
-        alt 答案或解析为空
-            Ex->>LLM: supplement_question_answer_and_analysis
-            LLM-->>Ex: correct, analysis
-        end
-        Ex->>DB: INSERT question, answer
-    end
-    Ex->>DB: UPDATE exercises.status=done
-    API-->>C: SSE 最后一行 {"exerciseId": "xxx"}
+    participant DB as 数据库
+    C->>API: generate-from-text
+    API->>DB: INSERT exercises
+    API->>Svc: RAG(可选)+拼 prompt
+    Svc->>LLM: 流式生成
+    LLM-->>Svc-->>API-->>C: SSE chunks
+    Svc->>Svc: 解析题目→补全答案(若有空)
+    Svc->>DB: questions+answers, status=done
+    API-->>C: exerciseId
 ```
 
 **技术点**：提示词在 `exercise_service._build_questions_prompt` 中拼接（用户意图、知识库参考、用户材料均有长度截断）；流式响应使用 FastAPI `StreamingResponse` + SSE；解析落库与补全答案在流结束后用独立 Session，避免请求级 Session 已关闭的问题。
@@ -352,15 +203,12 @@ sequenceDiagram
 
 ```mermaid
 flowchart LR
-    A[用户材料 content] --> B[前 2000 字作 query]
-    B --> C[百炼知识库 Retrieve]
-    C --> D[片段 text 拼成 rag_text]
-    D --> E{配置跳过梳理?}
-    E -->|是| F[rag_context = rag_text]
-    E -->|否| G[analyze_rag_context\n大模型整理]
-    G --> F
-    F --> H[_build_questions_prompt\n【知识库参考】]
-    H --> I[出题大模型]
+    A[材料] --> B[前2000字→百炼检索]
+    B --> C[rag_text]
+    C --> D{跳过梳理?}
+    D -->|是| E[rag_context]
+    D -->|否| F[LLM整理] --> E
+    E --> G[拼进 prompt→出题]
 ```
 
 **技术点**：百炼使用 OpenAPI SDK（`alibabacloud_bailian20231229`），检索为同步调用，在异步路由中用 `asyncio.to_thread` 执行；知识库 ID、业务空间 ID 及是否跳过梳理均来自配置。
@@ -378,21 +226,16 @@ flowchart LR
 ```mermaid
 sequenceDiagram
     participant C as 客户端
-    participant API as exercises 路由
-    participant FileAnalyze as file_analyze_service
-    participant DashScope as 大模型(文件能力)
-
-    C->>API: POST /exercises/analyze-file (file)
-    API->>API: 临时文件写入
-    API->>FileAnalyze: analyze_file_for_questions(tmp_path)
-    FileAnalyze->>DashScope: files.create(file)
-    DashScope-->>FileAnalyze: file_id
-    FileAnalyze->>DashScope: chat(system=fileid://file_id, user=分析提示词)
-    DashScope-->>FileAnalyze: 分析结果正文
-    FileAnalyze->>FileAnalyze: 解析标题行 + content
-    FileAnalyze-->>API: (content, title, usage)
-    API->>API: 删除临时文件
-    API-->>C: { content, title, usage }
+    participant API as exercises
+    participant Svc as file_analyze
+    participant LLM as 大模型
+    C->>API: analyze-file(file)
+    API->>Svc: 临时文件
+    Svc->>LLM: 上传文件→file_id
+    Svc->>LLM: chat(fileid+分析提示词)
+    LLM-->>Svc: 正文
+    Svc-->>API: content, title
+    API-->>C: content, title
 ```
 
 **技术点**：文件内容通过百炼「文件附件」能力传入，不在 user message 里拼文件正文；与「资料解析」链路不同，此处不落库 docs、不写磁盘资料库，仅一次性分析。
@@ -410,18 +253,13 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant C as 客户端
-    participant API as exercises 路由
-    participant DB as PostgreSQL
-
-    C->>API: POST /exercises/{id}/submit { answers: [{questionId, answer}] }
-    API->>DB: SELECT exercises, questions, answers
-    loop 每题
-        API->>API: 比对 userAnswer 与 correct_answer
-        API->>API: 累积 correct_count
-    end
-    API->>API: score, correct_rate, results[]
+    participant API as exercises
+    participant DB as 数据库
+    C->>API: submit(answers)
+    API->>DB: 查题目+标准答案
+    API->>API: 逐题比对→得分
     API->>DB: INSERT exercise_results
-    API-->>C: { score, correctRate, results }
+    API-->>C: score, results
 ```
 
 **技术点**：客观题判题为字符串一致；简答题等若在生成题目时已由大模型写出标准答案与解析，则这里直接复用，不做二次调用。如需「简答题 AI 批改」，可在此链路中对某类题目再调大模型比对用户答案与标准答案。

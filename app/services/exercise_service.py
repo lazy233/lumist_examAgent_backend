@@ -72,6 +72,10 @@ async def analyze_rag_context(raw_rag_text: str) -> str:
 {input_text}
 """
 
+    print("\n" + "=" * 60 + " [LLM 提示词] analyze_rag_context " + "=" * 60)
+    print(prompt)
+    print("=" * 60 + "\n")
+
     try:
         import time
         t0 = time.perf_counter()
@@ -117,6 +121,10 @@ async def analyze_material(
 材料：
 """
     prompt += (content.strip() or "")[:6000]
+
+    print("\n" + "=" * 60 + " [LLM 提示词] analyze_material " + "=" * 60)
+    print(prompt)
+    print("=" * 60 + "\n")
 
     client = get_openai_client()
     completion = await client.chat.completions.create(
@@ -228,6 +236,9 @@ async def stream_raw_and_collect(
         rag_context=rag_context,
         intent_context=intent_context,
     )
+    print("\n" + "=" * 60 + " [LLM 提示词] stream_raw_and_collect（生成题目） " + "=" * 60)
+    print(prompt)
+    print("=" * 60 + "\n")
     logger.info(
         "[第二次调大模型-完整提示词]\n%s\n%s\n%s",
         "=" * 60,
@@ -357,6 +368,10 @@ async def supplement_question_answer_and_analysis(
 题目（{type_cn}）：
 {question_text}
 """
+    print("\n" + "=" * 60 + " [LLM 提示词] supplement_question_answer_and_analysis " + "=" * 60)
+    print(prompt)
+    print("=" * 60 + "\n")
+
     try:
         client = get_openai_client()
         completion = await client.chat.completions.create(

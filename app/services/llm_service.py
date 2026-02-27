@@ -74,6 +74,10 @@ async def summarize_document(text: str) -> dict[str, Any]:
 """
     prompt += text[:8000]  # 限制长度，避免超 token
 
+    print("\n" + "=" * 60 + " [LLM 提示词] summarize_document " + "=" * 60)
+    print(prompt)
+    print("=" * 60 + "\n")
+
     client = get_openai_client()
     completion = await client.chat.completions.create(
         model=settings.llm_model,
@@ -106,6 +110,10 @@ async def stream_summarize_document(text: str) -> AsyncIterator[str]:
 """
     prompt += text[:8000]  # 限制长度，避免超 token
 
+    print("\n" + "=" * 60 + " [LLM 提示词] stream_summarize_document " + "=" * 60)
+    print(prompt)
+    print("=" * 60 + "\n")
+
     client = get_openai_client()
     completion = await client.chat.completions.create(
         model=settings.llm_model,
@@ -113,11 +121,20 @@ async def stream_summarize_document(text: str) -> AsyncIterator[str]:
         extra_body={"enable_thinking": True},
         stream=True,
     )
-    async for chunk in completion:
-        if not getattr(chunk, "choices", None):
-            continue
-        delta = chunk.choices[0].delta
-        if hasattr(delta, "reasoning_content") and delta.reasoning_content:
-            continue
-        if hasattr(delta, "content") and delta.content:
-            yield delta.content
+    collected: list[str] = []
+    try:
+        async for chunk in completion:
+            if not getattr(chunk, "choices", None):
+                continue
+            delta = chunk.choices[0].delta
+            if hasattr(delta, "reasoning_content") and delta.reasoning_content:
+                continue
+            if hasattr(delta, "content") and delta.content:
+                collected.append(delta.content)
+                yield delta.content
+    finally:
+        if collected:
+            full = "".join(collected)
+            print("\n" + "=" * 60 + " [LLM 输出] stream_summarize_document " + "=" * 60)
+            print(full)
+            print("=" * 60 + "\n")

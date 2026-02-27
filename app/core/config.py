@@ -27,6 +27,15 @@ class Settings:
     llm_model: str = os.getenv("LLM_MODEL", "qwen-long")
     # 文件解析（长文档总结）使用的模型，可与 llm_model 不同
     file_analyze_model: str = os.getenv("FILE_ANALYZE_MODEL", "qwen-long")
+    # 聊天相关配置：完全解耦，方便后续切换底层实现 / 模型 / RAG / Skills / MCP 等
+    # 聊天默认模型，不配置则回落到 llm_model
+    chat_model: str = os.getenv("CHAT_MODEL", "")
+    # 是否在聊天中启用 RAG（当前默认实现复用百炼检索，后续可替换）
+    chat_enable_rag: bool = os.getenv("CHAT_ENABLE_RAG", "false").lower() in ("1", "true", "yes")
+    # 是否在聊天中启用 skills 编排（当前仅记录启用列表，逻辑可在 chat_service 中扩展或替换）
+    chat_enable_skills: bool = os.getenv("CHAT_ENABLE_SKILLS", "true").lower() in ("1", "true", "yes")
+    # 是否在聊天中启用 MCP / 工具调用（占位配置，具体实现留给后续框架接入）
+    chat_enable_mcp: bool = os.getenv("CHAT_ENABLE_MCP", "false").lower() in ("1", "true", "yes")
 
 
 settings = Settings()

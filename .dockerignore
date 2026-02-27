@@ -1,26 +1,50 @@
-# Git 与版本控制
-.git
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Git
+.git/
 .gitignore
 
-# 虚拟环境与本地环境
-.venv
-venv
-.env
-.env.*
-!.env.example
-
-# 本地数据与模型（不打包进镜像）
+# Local data
 data/
-models/
+*.db
+*.sqlite
 
-# IDE 与缓存
-.idea
-.vscode
-__pycache__
-*.py[cod]
-.pytest_cache
-*.log
-
-# 文档与杂项（不影响运行）
+# Documentation (not needed in container)
 *.md
-!README.md
+docs/
+
+# Scripts (already in container)
+*.ps1
+config-wizard.ps1
+
+# Tests
+tests/
+pytest_cache/
+.coverage
+htmlcov/
+
+# Environment
+.env.example
+.env.backup.*
+
+# Logs
+*.log
+logs/

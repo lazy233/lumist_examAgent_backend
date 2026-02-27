@@ -82,12 +82,18 @@ async def analyze_file_for_questions(file_path: str | Path) -> tuple[str, str, d
     user_prompt = """请分析这篇文档的内容，提炼出主要内容和适合出题的知识要点，用连贯的文本概括（将作为后续出题的材料）。
 若需要建议标题，请在第一行写：标题：xxx ，换行后再写正文；否则直接写正文。"""
 
+    messages = [
+        {"role": "system", "content": f"fileid://{file_id}"},
+        {"role": "user", "content": user_prompt},
+    ]
+    print("\n" + "=" * 60 + " [LLM 提示词] analyze_file_for_questions " + "=" * 60)
+    for m in messages:
+        print(f"[{m['role']}]\n{m['content']}\n")
+    print("=" * 60 + "\n")
+
     completion = await client.chat.completions.create(
         model=settings.file_analyze_model,
-        messages=[
-            {"role": "system", "content": f"fileid://{file_id}"},
-            {"role": "user", "content": user_prompt},
-        ],
+        messages=messages,
     )
     usage = _normalize_usage(getattr(completion, "usage", None))
     raw = (completion.choices[0].message.content or "").strip()

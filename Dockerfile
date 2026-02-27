@@ -23,11 +23,19 @@ COPY app/ ./app/
 COPY sql/ ./sql/
 COPY scripts/ ./scripts/
 
-# 应用内使用 DATA_ROOT 等指向 /app/data，统一放于 /app/data
-ENV DATA_ROOT=/app/data
-ENV UPLOAD_DIR=/app/data/upload
-ENV LIBRARY_DIR=/app/data/library
-ENV DEBUG_DIR=/app/data/debug
+# 设置默认环境变量（可在运行时通过 .env 文件或 docker-compose 覆盖）
+ENV DATA_ROOT=/app/data \
+    UPLOAD_DIR=/app/data/upload \
+    LIBRARY_DIR=/app/data/library \
+    DEBUG_DIR=/app/data/debug \
+    API_PREFIX=/api \
+    ENVIRONMENT=production \
+    JWT_ALGORITHM=HS256 \
+    ACCESS_TOKEN_EXPIRE_MINUTES=10080 \
+    LLM_MODEL=qwen-long \
+    FILE_ANALYZE_MODEL=qwen-long \
+    DB_ECHO=false \
+    SKIP_RAG_ANALYZE=false
 
 # 创建数据目录（运行时也可用 volume 挂载）
 RUN mkdir -p /app/data/upload /app/data/library /app/data/debug

@@ -112,11 +112,13 @@ async def analyze(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    分析材料，返回出题要点。用户确认后再调用 /exercises/generate-from-text。
+    分析材料（粘贴/输入文字），返回出题要点。用户确认后再调用 /exercises/generate-from-text。
+    注意：只有「上传文件」会走 /exercises/analyze-file，才会打印 file_analyze_service 的提示词。
 
     **注意**：此接口会调用大模型，响应时间通常为 20–60 秒。前端请将请求超时设为至少 **60 秒**（如 axios timeout: 60000），否则会报超时失败。
     """
     response.headers["X-Recommended-Client-Timeout"] = "60000"
+    logger.info("[analyze] 收到请求：文字材料分析（非上传文件），将使用 analyze_material")
     t0 = time.perf_counter()
     user = await get_or_create_dev_user(db)
     key_points, usage = await analyze_material(
@@ -158,6 +160,7 @@ async def analyze_file(
     上传文件，调用大模型（qwen-long）分析文档内容，得到出题材料。
     用户确认后，将返回的 content、title 作为请求体调用 POST /exercises/generate-from-text 生成题目。
     """
+    logger.info("[analyze-file] 收到请求：上传文件分析 filename=%s，将使用 file_analyze_service", file.filename or "")
     await get_or_create_dev_user(db)
     if not file.filename or not file.filename.strip():
         raise HTTPException(status_code=400, detail="请上传文件")
